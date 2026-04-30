@@ -3,3 +3,25 @@
 .vs/
 *.user
 *.dte~
+# --- .NET 10 Core Essentials ---
+[Bb]in/
+[Oo]bj/
+[Tt]est[Cc]ontext[Rr]esults/
+[Dd]ebug/
+[Rr]elease/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Packages
+*.nupkg
+**/packages/
+
+# OS Files
+.DS_Store
+Thumbs.db
