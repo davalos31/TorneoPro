@@ -1,7 +1,5 @@
 ﻿using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
-using System.Net.Http; 
-using System; 
 
 namespace TorneoPro.API.Config
 {
@@ -9,13 +7,15 @@ namespace TorneoPro.API.Config
     {
         private static readonly string[] FileParameterNames = { "foto", "archivo", "file" };
 
-        public Task TransformAsync(OpenApiDocument document, OpenApiDocumentTransformerContext context, CancellationToken cancellationToken)
+        public Task TransformAsync(
+            OpenApiDocument document,
+            OpenApiDocumentTransformerContext context,
+            CancellationToken cancellationToken)
         {
             foreach (var path in document.Paths)
             {
                 foreach (var operation in path.Value.Operations)
                 {
-                  
                     if ((operation.Key == HttpMethod.Post || operation.Key == HttpMethod.Put) &&
                         TryGetFileParameterName(operation.Value, path.Key, out var fileParameterName))
                     {
@@ -27,11 +27,13 @@ namespace TorneoPro.API.Config
             return Task.CompletedTask;
         }
 
-        private bool TryGetFileParameterName(OpenApiOperation operation, string pathKey, out string fileParameterName)
+        private bool TryGetFileParameterName(
+            OpenApiOperation operation,
+            string pathKey,
+            out string fileParameterName)
         {
-            fileParameterName = null;
+            fileParameterName = null!;
 
-            // Revisar parámetros explícitos en la operación
             if (operation.Parameters != null)
             {
                 foreach (var param in operation.Parameters)
@@ -44,7 +46,6 @@ namespace TorneoPro.API.Config
                 }
             }
 
-        
             foreach (var paramName in FileParameterNames)
             {
                 if (pathKey.Contains($"/{paramName}", StringComparison.OrdinalIgnoreCase))
@@ -57,7 +58,7 @@ namespace TorneoPro.API.Config
             return false;
         }
 
-        private OpenApiRequestBody CreateFileUploadRequestBody(string parameterName)
+        private static OpenApiRequestBody CreateFileUploadRequestBody(string parameterName)
         {
             return new OpenApiRequestBody
             {

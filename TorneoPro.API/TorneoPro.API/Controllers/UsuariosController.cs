@@ -1,14 +1,20 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
+using TorneoPro.API.DTOs.Jugadores.Request;
+using TorneoPro.API.DTOs.Jugadores.Response;
+using TorneoPro.API.DTOs.Notificaciones;
 using TorneoPro.API.DTOs.Shared;
 using TorneoPro.API.DTOs.Usuarios;
 using TorneoPro.API.DTOs.Usuarios.Request;
 using TorneoPro.API.DTOs.Usuarios.Response;
 using TorneoPro.API.Servicios.Implementaciones;
 using TorneoPro.API.Servicios.Implementaciones.Auditoria;
+using TorneoPro.API.Servicios.Implementaciones.Notifiacion;
 using TorneoPro.API.Servicios.Interfaces;
 using TorneoPro.API.Servicios.Interfaces.Auditoria;
+using TorneoPro.API.Servicios.Interfaces.Jugador;
+using TorneoPro.API.Servicios.Interfaces.Notificacion;
 using TorneoPro.API.Servicios.Interfaces.Usuarios;
 
 namespace TorneoPro.API.Controllers
@@ -16,25 +22,41 @@ namespace TorneoPro.API.Controllers
     [Route("api/usuarios")]
     [ApiController]
     [Authorize]
+
+    /// <summary>
+    /// Controlador para la gestión administrativa y de perfil de usuarios.
+    /// Permite operaciones de consulta, actualización de datos, gestión de roles y auditoría de acciones.
+    /// </summary>
     public class UsuariosController : ControllerBase
     {
         private readonly IUsuarioService _usuarioService;
         private readonly IAuditoriaService _auditoriaService;
         private readonly ILogger<UsuariosController> _logger;
+        private readonly IJugadorService _jugadorService;
+        private readonly INotificacionService _notificacionService;
 
         public UsuariosController(
+            IJugadorService jugadorService,
             IUsuarioService usuarioService,
             IAuditoriaService auditoriaService,
-            ILogger<UsuariosController> logger)
+            ILogger<UsuariosController> logger,
+            INotificacionService notificacionService)
         {
             _usuarioService = usuarioService;
             _auditoriaService = auditoriaService;
             _logger = logger;
+            _jugadorService = jugadorService;
+            _notificacionService = notificacionService;
         }
 
         /// <summary>
-        /// Listar usuarios (paginado) - Solo administradores
+        /// Obtiene una lista paginada de todos los usuarios registrados en el sistema.
         /// </summary>
+        /// <param name="solicitud">Objeto que contiene los parámetros de paginación (Página y Tamaño).</param>
+        /// <returns>Resultado paginado con información básica de los usuarios.</returns>
+        /// <response code="200">Retorna la lista de usuarios.</response>
+        /// <response code="401">No autorizado.</response>
+        /// <response code="403">El usuario no tiene roles administrativos (SUPER_ADMIN, ADMIN, SUB_ADMIN).</response>
         [HttpGet("listar")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN,SUB_ADMIN")]
         public async Task<IActionResult> Listar([FromQuery] PaginacionRequest solicitud)
@@ -62,8 +84,80 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Obtener usuario por ID
+        /// Registra un nuevo jugador en el sistema y envía una notificación de bienvenida.
         /// </summary>
+        /// <remarks>
+        /// Este endpoint permite a un administrador dar de alta a un usuario con el rol de jugador.
+        /// El proceso incluye:
+        /// 1. Registro en la base de datos a través del servicio de jugadores.
+        /// 2. Envío de una notificación interna de bienvenida.
+        /// 3. Registro de la acción en la bitácora de auditoría.
+        /// </remarks>
+        /// <param name="solicitud">Objeto que contiene los datos del jugador (Email, Nombres, Apellidos, etc.).</param>
+        /// <returns>Retorna un <see cref="ApiRespuesta{T}"/> con la información del jugador creado.</returns>
+        /// <response code="200">El jugador fue registrado y notificado exitosamente.</response>
+        /// <response code="400">La solicitud es inválida o el email ya se encuentra registrado.</response>
+        /// <response code="403">El usuario no tiene permisos suficientes para realizar esta acción.</response>
+        /// <response code="500">Error interno al procesar el registro.</response>
+        [HttpPost("registrar")]
+        [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
+        public async Task<IActionResult> RegistrarJugador([FromBody] RegistrarJugadorRequest solicitud)
+        {
+            var usuarioId = ObtenerUsuarioActualId();
+            var ipCliente = ObtenerIpCliente();
+            var userAgent = Request.Headers["User-Agent"].ToString();
+
+            _logger.LogInformation("Registro de jugador - AdministradorId: {AdminId}, Email: {Email}, IP: {Ip}",
+                usuarioId, solicitud.Email, ipCliente);
+
+            try
+            {
+                var resultado = await _jugadorService.RegistrarJugadorAsync(usuarioId, solicitud, ipCliente, userAgent);
+
+                await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
+                {
+                    IdUsuarioDestino = resultado.Id,
+                    IdTipoNotificacion = 1,
+                    Titulo = "¡Bienvenido a TorneoPro!",
+                    Mensaje = $"Hola {resultado.NombreCompleto}, tu cuenta ha sido creada exitosamente. Ya puedes participar en torneos.",
+                    Prioridad = "MEDIA"
+                });
+
+                await _auditoriaService.RegistrarExitoAsync(
+                    usuarioId,
+                    "REGISTRAR_JUGADOR",
+                    "usuarios",
+                    resultado.Id,
+                    System.Text.Json.JsonSerializer.Serialize(new { solicitud.Email, solicitud.Nombres, solicitud.Apellidos }));
+
+                _logger.LogInformation("Jugador registrado exitosamente - JugadorId: {JugadorId}, Email: {Email}",
+                    resultado.Id, solicitud.Email);
+
+                return Ok(ApiRespuesta<JugadorResponse>.Success(resultado, "Jugador registrado exitosamente"));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return StatusCode(403, ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al registrar jugador - Email: {Email}", solicitud.Email);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al registrar el jugador"));
+            }
+        }
+
+
+
+        /// <summary>
+        /// Recupera la información detallada de un usuario específico por su identificador único.
+        /// </summary>
+        /// <param name="id">ID del usuario a consultar.</param>
+        /// <returns>Detalles completos del perfil del usuario.</returns>
+        /// <remarks>Los usuarios regulares solo pueden consultarse a sí mismos. Admins pueden consultar cualquier ID.</remarks>
         [HttpGet("obtener/{id}")]
         public async Task<IActionResult> ObtenerPorId(int id)
         {
@@ -115,8 +209,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Actualizar perfil de usuario
+        /// Actualiza la información personal y de perfil de un usuario existente.
         /// </summary>
+        /// <param name="id">ID del usuario a actualizar.</param>
+        /// <param name="solicitud">Datos actualizados del perfil (Nombre, Biografía, Medidas, etc.).</param>
+        /// <returns>Respuesta de éxito con los datos actualizados.</returns>
         [HttpPut("actualizar/{id}")]
         public async Task<IActionResult> Actualizar(int id, [FromBody] ActualizarUsuarioRequest solicitud)
         {
@@ -124,7 +221,7 @@ namespace TorneoPro.API.Controllers
             var rolesActuales = ObtenerRolesActuales();
             var ipCliente = ObtenerIpCliente();
 
-            // Obtener datos anteriores para auditoría
+         
             var usuarioAnterior = await _usuarioService.ObtenerPorIdAsync(id);
 
             _logger.LogInformation("Actualización de usuario - UsuarioIdActualizar: {UsuarioActualizar}, SolicitadoPor: {UsuarioId}, IP: {Ip}",
@@ -234,8 +331,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Actualizar foto de perfil
+        /// Actualiza o establece la imagen de perfil del usuario mediante la carga de un archivo.
         /// </summary>
+        /// <param name="id">ID del usuario al que pertenece la foto.</param>
+        /// <param name="foto">Archivo de imagen (Multipart/form-data).</param>
+        /// <returns>La URL de la nueva foto cargada.</returns>
         [HttpPut("actualizar-foto/{id}")]
         public async Task<IActionResult> ActualizarFoto(int id, [FromForm] IFormFile foto)
         {
@@ -338,8 +438,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Cambiar contraseña
+        /// Permite a un usuario autenticado modificar su contraseña de acceso actual.
         /// </summary>
+        /// <param name="id">ID del usuario.</param>
+        /// <param name="solicitud">Contiene la contraseña anterior y la nueva para validación.</param>
+        /// <returns>Resultado de la operación.</returns>
         [HttpPut("cambiar-contrasena/{id}")]
         public async Task<IActionResult> CambiarContrasena(int id, [FromBody] CambiarPasswordRequest solicitud)
         {
@@ -441,8 +544,10 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Desactivar usuario (eliminación lógica) - Solo administradores
+        /// Realiza una desactivación lógica de un usuario en el sistema. Solo para Administradores.
         /// </summary>
+        /// <param name="id">ID del usuario a desactivar.</param>
+        /// <returns>Confirmación de la desactivación.</returns>
         [HttpDelete("desactivar/{id}")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> Desactivar(int id)
@@ -516,8 +621,10 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Ver roles del usuario
+        /// Lista todos los roles asociados a un usuario en particular.
         /// </summary>
+        /// <param name="id">ID del usuario.</param>
+        /// <returns>Lista de objetos de tipo RolResponse.</returns>
         [HttpGet("roles/{id}")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> ObtenerRoles(int id)
@@ -550,8 +657,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Asignar rol a usuario - Solo administradores
+        /// Asigna un nuevo rol a un usuario, permitiendo especificar opcionalmente el contexto del Torneo o Equipo.
         /// </summary>
+        /// <param name="id">ID del usuario.</param>
+        /// <param name="solicitud">Detalles del rol a asignar y su vigencia.</param>
+        /// <returns>Información del rol asignado.</returns>
         [HttpPost("asignar-rol/{id}")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> AsignarRol(int id, [FromBody] AsignarRolRequest solicitud)
@@ -634,8 +744,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Revocar rol de usuario - Solo administradores
+        /// Remueve la asociación de un rol específico de un usuario.
         /// </summary>
+        /// <param name="id">ID del usuario.</param>
+        /// <param name="rolId">ID del rol a revocar.</param>
+        /// <returns>Confirmación de la revocación exitosa.</returns>
         [HttpDelete("revocar-rol/{id}/{rolId}")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> RevocarRol(int id, int rolId)
@@ -709,6 +822,11 @@ namespace TorneoPro.API.Controllers
             }
         }
 
+        /// <summary>
+        /// Extrae el identificador del usuario (ID) desde los Claims del token JWT actual.
+        /// </summary>
+        /// <returns>ID numérico del usuario.</returns>
+        /// <exception cref="UnauthorizedAccessException">Se lanza si el Claim no está presente o no es válido.</exception>
         private int ObtenerUsuarioActualId()
         {
             var usuarioIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -721,7 +839,10 @@ namespace TorneoPro.API.Controllers
 
             return usuarioId;
         }
-
+        /// <summary>
+        /// Recupera la lista de nombres de roles contenidos en el token JWT del usuario actual.
+        /// </summary>
+        /// <returns>Lista de strings con los nombres de los roles.</returns>
         private List<string> ObtenerRolesActuales()
         {
             return User.Claims
@@ -729,7 +850,10 @@ namespace TorneoPro.API.Controllers
                 .Select(c => c.Value)
                 .ToList();
         }
-
+        /// <summary>
+        /// Obtiene la dirección IP del cliente desde los encabezados de la solicitud o la conexión remota.
+        /// </summary>
+        /// <returns>String con la dirección IP o "IP desconocida".</returns>
         private string ObtenerIpCliente()
         {
             var ip = Request.Headers["X-Forwarded-For"].FirstOrDefault();

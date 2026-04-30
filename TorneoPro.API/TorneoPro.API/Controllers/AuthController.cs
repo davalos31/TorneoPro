@@ -13,6 +13,14 @@ namespace TorneoPro.API.Controllers
 {
     [Route("api/auth")]
     [ApiController]
+    /// <summary>
+    /// Proporciona servicios de autenticación y gestión de identidad para la plataforma TorneoPro.
+    /// </summary>
+    /// <remarks>
+    /// Este controlador centraliza la seguridad del sistema, manejando el ciclo de vida de los tokens JWT,
+    /// la recuperación de cuentas y el registro administrativo. Todas las operaciones críticas están 
+    /// vinculadas al servicio de auditoría para trazabilidad.
+    /// </remarks>
     public class AuthController : ControllerBase
     {
         private readonly IAuthService _authService;
@@ -31,8 +39,13 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Iniciar sesión en el sistema
+        /// Autentica a un usuario y genera un nuevo token de acceso JWT.
         /// </summary>
+        /// <param name="solicitud">Objeto que contiene el email y la contraseña del usuario.</param>
+        /// <returns>Objeto de respuesta con el token, refresh token y datos básicos del perfil.</returns>
+        /// <response code="200">Autenticación exitosa.</response>
+        /// <response code="401">Credenciales incorrectas o acceso denegado.</response>
+        /// <response code="500">Error interno procesando la autenticación.</response>
         [HttpPost("iniciar-sesion")]
         [AllowAnonymous]
         public async Task<IActionResult> IniciarSesion([FromBody] LoginRequest solicitud)
@@ -86,8 +99,16 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Registrar nuevo usuario (solo administradores)
+        /// Registra un nuevo usuario en el sistema con un rol específico.
         /// </summary>
+        /// <remarks>
+        /// Acceso restringido a usuarios con roles administrativos. El proceso incluye validaciones 
+        /// de duplicidad de correo y asignación de permisos iniciales.
+        /// </remarks>
+        /// <param name="solicitud">Datos de registro del nuevo usuario.</param>
+        /// <returns>Datos del usuario recién creado.</returns>
+        /// <response code="200">Usuario creado correctamente.</response>
+        /// <response code="400">Datos de solicitud inválidos o email ya registrado.</response>
         [HttpPost("registrar")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> Registrar([FromBody] RegistrarUsuarioRequest solicitud)
@@ -151,8 +172,12 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Renovar token JWT usando token de actualización
+        /// Genera un nuevo set de tokens (Access y Refresh) utilizando un Refresh Token válido.
         /// </summary>
+        /// <param name="solicitud">Objeto que contiene el Refresh Token actual.</param>
+        /// <returns>Nuevo par de tokens JWT.</returns>
+        /// <response code="200">Token renovado con éxito.</response>
+        /// <response code="401">El Refresh Token ha expirado o no es válido.</response>
         [HttpPost("renovar-token")]
         [AllowAnonymous]
         public async Task<IActionResult> RenovarToken([FromBody] RefrescarTokenRequest solicitud)
@@ -189,8 +214,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Cerrar sesión
+        /// Finaliza la sesión actual del usuario y revoca sus tokens activos.
         /// </summary>
+        /// <remarks>
+        /// Invalida el Refresh Token en la base de datos para evitar su reutilización.
+        /// </remarks>
         [HttpPost("cerrar-sesion")]
         [Authorize]
         public async Task<IActionResult> CerrarSesion()
@@ -218,8 +246,13 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Solicitar recuperación de contraseña
+        /// Inicia el flujo de recuperación de contraseña enviando un correo al usuario.
         /// </summary>
+        /// <param name="solicitud">Contiene el email de la cuenta a recuperar.</param>
+        /// <remarks>
+        /// Por seguridad, el sistema responde éxito incluso si el correo no existe, 
+        /// para evitar la enumeración de usuarios.
+        /// </remarks>
         [HttpPost("olvide-contrasena")]
         [AllowAnonymous]
         public async Task<IActionResult> OlvideContrasena([FromBody] OlvidePasswordRequest solicitud)
@@ -245,8 +278,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Restablecer contraseña con token
+        /// Actualiza la contraseña del usuario utilizando un token de recuperación válido.
         /// </summary>
+        /// <param name="solicitud">Contiene el token, el email y la nueva contraseña.</param>
+        /// <response code="200">Contraseña actualizada correctamente.</response>
+        /// <response code="400">Token inválido, expirado o requisitos de contraseña no cumplidos.</response>
         [HttpPost("restablecer-contrasena")]
         [AllowAnonymous]
         public async Task<IActionResult> RestablecerContrasena([FromBody] RestablecerPasswordRequest solicitud)
@@ -277,8 +313,12 @@ namespace TorneoPro.API.Controllers
             }
         }
 
-        
 
+        /// <summary>
+        /// Procesa la verificación del correo electrónico y sirve una página de respuesta visual.
+        /// </summary>
+        /// <param name="token">Token de verificación recibido por correo.</param>
+        /// <returns>Contenido HTML dinámico con el resultado de la verificación.</returns>
         [HttpGet("verificar-email/{token}")]
         [AllowAnonymous]
         public async Task<IActionResult> VerificarEmailPage(string token)
@@ -469,8 +509,13 @@ namespace TorneoPro.API.Controllers
 
 
         /// <summary>
-        /// Obtener información del usuario autenticado
+        /// Retorna la información detallada del perfil del usuario actualmente autenticado.
         /// </summary>
+        /// <remarks>
+        /// Los datos se extraen basándose en el ID contenido en el token de la solicitud.
+        /// </remarks>
+        /// <response code="200">Perfil obtenido exitosamente.</response>
+        /// <response code="404">El usuario no pudo ser localizado en el sistema.</response>
         [HttpGet("mi-perfil")]
         [Authorize]
         public async Task<IActionResult> ObtenerMiPerfil()
@@ -500,6 +545,10 @@ namespace TorneoPro.API.Controllers
             }
         }
 
+        /// <summary>
+        /// Extrae el ID del usuario desde los Claims del contexto de seguridad.
+        /// </summary>
+        /// <exception cref="UnauthorizedAccessException">Se lanza si el Claim no está presente.</exception>
         private int ObtenerUsuarioActualId()
         {
             var usuarioIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
@@ -513,6 +562,9 @@ namespace TorneoPro.API.Controllers
             return usuarioId;
         }
 
+        /// <summary>
+        /// Identifica la dirección IP de origen de la solicitud, considerando proxies y balanceadores.
+        /// </summary>
         private string ObtenerIpCliente()
         {
             var ip = Request.Headers["X-Forwarded-For"].FirstOrDefault();

@@ -14,10 +14,22 @@ using TorneoPro.API.Helpers;
 using TorneoPro.API.Hubs;
 using TorneoPro.API.Middleware;
 using TorneoPro.API.Seeder;
+using TorneoPro.API.Servicios.Implementaciones.AccesoTemporal;
+using TorneoPro.API.Servicios.Implementaciones.Auditoria;
 using TorneoPro.API.Servicios.Implementaciones.Auth;
+using TorneoPro.API.Servicios.Implementaciones.Cancha;
+using TorneoPro.API.Servicios.Implementaciones.Email;
+using TorneoPro.API.Servicios.Implementaciones.Jugador;
+using TorneoPro.API.Servicios.Implementaciones.Notifiacion;
 using TorneoPro.API.Servicios.Implementaciones.Usuarios;
+using TorneoPro.API.Servicios.Interfaces.AccesoTemporal;
+using TorneoPro.API.Servicios.Interfaces.Auditoria;
 using TorneoPro.API.Servicios.Interfaces.Auth;
+using TorneoPro.API.Servicios.Interfaces.Cancha;
+using TorneoPro.API.Servicios.Interfaces.Email;
 using TorneoPro.API.Servicios.Interfaces.Estadistica_Vivo;
+using TorneoPro.API.Servicios.Interfaces.Jugador;
+using TorneoPro.API.Servicios.Interfaces.Notificacion;
 using TorneoPro.API.Servicios.Interfaces.Usuarios;
 
 QuestPDF.Settings.License = LicenseType.Community;
@@ -155,8 +167,14 @@ builder.Services.AddScoped<JwtHelper>();
 builder.Services.AddScoped<ArchivosHelper>();
 builder.Services.AddScoped<QRHelper>();
 
+builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<INotificacionService, NotificacionService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IUsuarioService, UsuarioService>();
+builder.Services.AddScoped<IJugadorService, JugadorService>();
+builder.Services.AddScoped<ICanchaService, CanchaService>();
+builder.Services.AddScoped<IAccesoTemporalService, AccesoTemporalService>();
+builder.Services.AddScoped<IAuditoriaService, AuditoriaService>();
 
 
 builder.Services.AddSignalR();
