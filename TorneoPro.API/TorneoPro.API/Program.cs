@@ -12,21 +12,18 @@ using TorneoPro.API.Config;
 using TorneoPro.API.Data;
 using TorneoPro.API.Helpers;
 using TorneoPro.API.Hubs;
-using TorneoPro.API.Interfaces.Estadistica_Vivo;
 using TorneoPro.API.Middleware;
 using TorneoPro.API.Seeder;
+using TorneoPro.API.Servicios.Interfaces.Estadistica_Vivo;
 
 QuestPDF.Settings.License = LicenseType.Community;
 ExcelPackage.License.SetNonCommercialPersonal("TorneoPro.Api");
 
-// ============================================================
-// 2. BUILDER Y SERVICIOS
-// ============================================================
+
 var builder = WebApplication.CreateBuilder(args);
 
 ConfiguracionSerilog.ConfigurarLogging(builder);
 
-// 2.1. CORS
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
@@ -50,7 +47,7 @@ builder.Services.AddCors(options =>
     });
 });
 
-// 2.2. Controladores + Razor Pages
+
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
@@ -59,12 +56,10 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
     });
 
-// AGREGAR SOPORTE PARA RAZOR PAGES
+
 builder.Services.AddRazorPages();
 
 
-
-// 2.3. OpenAPI + Scalar
 builder.Services.AddOpenApi(options =>
 {
     options.AddDocumentTransformer<BearerSecuritySchemeTransformer>();
@@ -88,7 +83,7 @@ builder.Services.AddOpenApi(options =>
     });
 });
 
-// 2.4. Base de Datos
+
 builder.Services.AddDbContext<TorneoProContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("TorneoProContext");
@@ -108,7 +103,7 @@ builder.Services.AddDbContext<TorneoProContext>(options =>
     }
 });
 
-// 2.5. JWT
+
 var jwtSettings = builder.Configuration.GetSection("Jwt");
 var secretKey = jwtSettings["SecretKey"] ?? throw new InvalidOperationException("JWT SecretKey no configurada");
 
@@ -271,7 +266,7 @@ app.MapHub<EstadisticasHub>("/hubs/estadisticas");
 
 app.UseStaticFiles();
 
-// 4.11. Redirección raíz → Scalar
+
 app.MapGet("/", () => Results.Redirect("/scalar/v1"))
    .ExcludeFromDescription();
 

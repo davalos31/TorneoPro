@@ -1,7 +1,6 @@
-﻿
-using TorneoPro.API.DTOs.Estadisticas.Response;
+﻿using TorneoPro.API.DTOs.Estadisticas.Response;
 
-namespace TorneoPro.API.Interfaces.Estadistica_Vivo
+namespace TorneoPro.API.Servicios.Interfaces.Estadistica_Vivo
 {
     public interface IEstadisticaEnVivoService
     {

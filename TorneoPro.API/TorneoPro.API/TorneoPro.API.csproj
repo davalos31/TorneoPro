@@ -37,7 +37,6 @@
 
   <ItemGroup>
     <Folder Include="DTOs\Estadisticas\Request\" />
-    <Folder Include="Implementaciones\" />
   </ItemGroup>
 
 </Project>
