@@ -14,7 +14,11 @@ using TorneoPro.API.Helpers;
 using TorneoPro.API.Hubs;
 using TorneoPro.API.Middleware;
 using TorneoPro.API.Seeder;
+using TorneoPro.API.Servicios.Implementaciones.Auth;
+using TorneoPro.API.Servicios.Implementaciones.Usuarios;
+using TorneoPro.API.Servicios.Interfaces.Auth;
 using TorneoPro.API.Servicios.Interfaces.Estadistica_Vivo;
+using TorneoPro.API.Servicios.Interfaces.Usuarios;
 
 QuestPDF.Settings.License = LicenseType.Community;
 ExcelPackage.License.SetNonCommercialPersonal("TorneoPro.Api");
@@ -150,6 +154,9 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<JwtHelper>();
 builder.Services.AddScoped<ArchivosHelper>();
 builder.Services.AddScoped<QRHelper>();
+
+builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IUsuarioService, UsuarioService>();
 
 
 builder.Services.AddSignalR();
