@@ -1,93 +1,152 @@
 ﻿using TorneoPro.API.Controllers;
-using TorneoPro.API.DTOs.AccesoTemporal;
 using TorneoPro.API.DTOs.AccesoTemporal.Request;
+using TorneoPro.API.DTOs.AccesoTemporal.Response;
 using TorneoPro.API.DTOs.Shared;
+using TorneoPro.API.Helpers;
+using DeepLinkInfoResponse = TorneoPro.API.DTOs.AccesoTemporal.Response.DeepLinkInfoResponse;
 
 namespace TorneoPro.API.Servicios.Interfaces.AccesoTemporal
 {
     public interface IAccesoTemporalService
     {
+        #region Creación de Enlaces
 
         /// <summary>
-        /// Obtiene información de una invitación para la página web intermedia
+        /// Crea enlace temporal genérico
         /// </summary>
-        Task<InviteInfoResponse?> ObtenerInfoInvitacionAsync(string token);
+        Task<EnlaceTemporalResponse> CrearEnlaceTemporalAsync(
+            int usuarioIdCreador,
+            EnlaceTemporalRequest solicitud,
+            string? ipAddress = null,
+            string? userAgent = null);
 
         /// <summary>
-        /// Crear enlace temporal para acceso a entidad específica
+        /// Crea enlace para árbitro de partido
         /// </summary>
-        Task<EnlaceTemporalResponse> CrearEnlaceTemporalAsync(int usuarioIdCreador, EnlaceTemporalRequest solicitud, string? ipAddress = null, string? userAgent = null);
+        Task<EnlaceTemporalResponse> CrearEnlaceArbitroPartidoAsync(
+            int usuarioIdCreador,
+            int idPartido,
+            int? idUsuarioDestino = null,
+            string? ipAddress = null,
+            string? userAgent = null);
 
         /// <summary>
-        /// Crear enlace para árbitro de partido (con expiración automática post-partido)
+        /// Crea enlace para capitán (alineación)
         /// </summary>
-        Task<EnlaceTemporalResponse> CrearEnlaceArbitroPartidoAsync(int usuarioIdCreador, int idPartido, int? idUsuarioDestino = null, string? ipAddress = null, string? userAgent = null);
+        Task<EnlaceTemporalResponse> CrearEnlaceCapitanAlineacionAsync(
+            int usuarioIdCreador,
+            int idPartido,
+            int idEquipo,
+            int? idUsuarioDestino = null,
+            string? ipAddress = null,
+            string? userAgent = null);
 
         /// <summary>
-        /// Crear enlace para capitán para alineación (expira 1 hora antes del partido)
+        /// Crea enlace para jugador (confirmar asistencia)
         /// </summary>
-        Task<EnlaceTemporalResponse> CrearEnlaceCapitanAlineacionAsync(int usuarioIdCreador, int idPartido, int idEquipo, int? idUsuarioDestino = null, string? ipAddress = null, string? userAgent = null);
+        Task<EnlaceTemporalResponse> CrearEnlaceJugadorAsistenciaAsync(
+            int usuarioIdCreador,
+            int idPartido,
+            int idJugador,
+            string? ipAddress = null,
+            string? userAgent = null);
 
         /// <summary>
-        /// Crear enlace para jugador confirmar asistencia (expira 24 horas antes del partido)
+        /// Crea invitación para unirse a equipo
         /// </summary>
-        Task<EnlaceTemporalResponse> CrearEnlaceJugadorAsistenciaAsync(int usuarioIdCreador, int idPartido, int idJugador, string? ipAddress = null, string? userAgent = null);
+        Task<EnlaceTemporalResponse> CrearEnlaceInvitacionEquipoAsync(
+            int usuarioIdCreador,
+            int idEquipo,
+            int idUsuarioDestino,
+            string? ipAddress = null,
+            string? userAgent = null);
+
+        #endregion
+
+        #region Uso y Consulta
 
         /// <summary>
-        /// Crear enlace para invitar a un jugador a un equipo (sin partido asociado)
+        /// Usa un enlace temporal
         /// </summary>
-        Task<EnlaceTemporalResponse> CrearEnlaceInvitacionEquipoAsync(int usuarioIdCreador, int idEquipo, int idUsuarioDestino, string? ipAddress = null, string? userAgent = null);
+        Task<UsarEnlaceTemporalResponse> UsarEnlaceTemporalAsync(
+            string token,
+            int usuarioId,
+            string? ipAddress = null,
+            string? userAgent = null);
 
         /// <summary>
-        /// Usar enlace temporal (acceder a la entidad)
-        /// </summary>
-        Task<UsarEnlaceTemporalResponse> UsarEnlaceTemporalAsync(string token, int usuarioId, string? ipAddress = null, string? userAgent = null);
-
-        /// <summary>
-        /// Obtener información del enlace (sin usarlo)
+        /// Obtiene información de un enlace (sin usarlo)
         /// </summary>
         Task<EnlaceTemporalResponse?> ObtenerInfoEnlaceAsync(string token);
 
         /// <summary>
-        /// Obtener mis enlaces temporales creados
+        /// Obtiene información para página web de invitación
         /// </summary>
-        Task<ResultadoPaginado<EnlaceTemporalResponse>> ObtenerMisEnlacesAsync(int usuarioId, FiltrarEnlaceTemporalRequest solicitud);
+        Task<InviteInfoResponse?> ObtenerInfoInvitacionAsync(string token);
 
         /// <summary>
-        /// Desactivar enlace temporal
+        /// Obtiene información para deep link (app móvil)
+        /// </summary>
+        Task<DeepLinkInfoResponse?> ObtenerInfoDeepLinkAsync(string token);
+
+        #endregion
+
+        #region Registro Público
+
+        /// <summary>
+        /// Registra un nuevo jugador desde invitación
+        /// </summary>
+        Task<RegistroPublicoResponse> RegistrarJugadorDesdeInvitacionAsync(
+            RegistroPublicoRequest request,
+            string? ipAddress = null,
+            string? userAgent = null);
+
+        /// <summary>
+        /// Usuario existente se une a equipo
+        /// </summary>
+        Task<UnirseEquipoResponse> UnirseAEquipoAsync(
+            string tokenEquipo,
+            int usuarioId,
+            string? ipAddress = null,
+            string? userAgent = null);
+
+        #endregion
+
+        #region Gestión
+
+        /// <summary>
+        /// Obtiene enlaces del usuario (paginado)
+        /// </summary>
+        Task<ResultadoPaginado<EnlaceTemporalResponse>> ObtenerMisEnlacesAsync(
+            int usuarioId,
+            FiltrarEnlaceTemporalRequest solicitud);
+
+        /// <summary>
+        /// Desactiva un enlace
         /// </summary>
         Task DesactivarEnlaceAsync(int id, int usuarioId, string? motivo = null);
 
         /// <summary>
-        /// Renovar enlace temporal
+        /// Renueva un enlace
         /// </summary>
-        Task<EnlaceTemporalResponse> RenovarEnlaceAsync(int id, int usuarioId, int horasExtra, string? ipAddress = null, string? userAgent = null);
+        Task<EnlaceTemporalResponse> RenovarEnlaceAsync(
+            int id,
+            int usuarioId,
+            int horasExtra,
+            string? ipAddress = null);
 
         /// <summary>
-        /// Obtener historial de usos del enlace
+        /// Obtiene historial de usos
         /// </summary>
         Task<List<UsoEnlaceTemporalResponse>> ObtenerHistorialUsosAsync(int enlaceId, int usuarioId);
 
         /// <summary>
-        /// Enviar enlaces automáticos para partidos del día (job programado)
+        /// Envía enlaces automáticos para partidos del día siguiente
         /// </summary>
         Task EnviarEnlacesAutomaticosAsync();
 
-        /// <summary>
-        /// Obtener información del deep link para la app móvil
-        /// </summary>
-        Task<DeepLinkInfoResponse?> ObtenerInfoDeepLinkAsync(string token);
+        #endregion
     }
 
-    public class UsoEnlaceTemporalResponse
-    {
-        public int Id { get; set; }
-        public int IdUsuario { get; set; }
-        public string Usuario { get; set; } = string.Empty;
-        public string? Email { get; set; }
-        public DateTime FechaUso { get; set; }
-        public string? IpAddress { get; set; }
-        public bool UsoExitoso { get; set; }
-        public string? MotivoFallo { get; set; }
-    }
+    
 }

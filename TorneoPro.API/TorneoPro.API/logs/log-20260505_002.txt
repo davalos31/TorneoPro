@@ -1,0 +1,11 @@
+2026-05-05 17:55:05.549 -04:00 [INF] Servicio de estadísticas en vivo iniciado
+2026-05-05 17:55:08.262 -04:00 [WRN] Sensitive data logging is enabled. Log entries and exception messages may include sensitive application data; this mode should only be enabled during development.
+2026-05-05 17:55:09.157 -04:00 [INF] No hay migraciones pendientes.
+2026-05-05 17:55:09.160 -04:00 [INF] Iniciando proceso de seeding...
+2026-05-05 17:55:09.360 -04:00 [INF] La base de datos ya contiene datos. Seeding omitido.
+2026-05-05 17:55:09.728 -04:00 [WRN] The WebRootPath was not found: C:\Users\axero\3D Objects\TorneoPro_Workspace\TorneoPro.API\TorneoPro.API\TorneoPro.API\wwwroot. Static files may be unavailable.
+2026-05-05 17:55:09.972 -04:00 [INF] Now listening on: https://localhost:7221
+2026-05-05 17:55:09.975 -04:00 [INF] Now listening on: http://localhost:5192
+2026-05-05 17:55:10.052 -04:00 [INF] Application started. Press Ctrl+C to shut down.
+2026-05-05 17:55:10.054 -04:00 [INF] Hosting environment: Development
+2026-05-05 17:55:10.056 -04:00 [INF] Content root path: C:\Users\axero\3D Objects\TorneoPro_Workspace\TorneoPro.API\TorneoPro.API\TorneoPro.API

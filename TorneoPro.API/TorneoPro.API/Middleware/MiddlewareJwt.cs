@@ -41,14 +41,17 @@ namespace TorneoPro.API.Middleware
 
         private static readonly string[] _prefijosPublicos = new[]
           {
-            "/api/torneos",
+             "/api/torneos",
             "/api/estadisticas",
             "/swagger",
             "/scalar",
             "/openapi",
-            "/invite",
-            "/api/invite",
-            "/login"   // ← AGREGAR
+            "/invite",      
+            "/login",      
+            "/registro",    
+            "/css",         
+            "/js",         
+            "/favicon.ico"
         };
 
         public MiddlewareJwt(RequestDelegate next, IConfiguration configuration, ILogger<MiddlewareJwt> logger)

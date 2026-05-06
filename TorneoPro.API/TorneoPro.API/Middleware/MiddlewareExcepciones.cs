@@ -33,8 +33,7 @@ namespace TorneoPro.API.Middleware
 
         private async Task HandleExceptionAsync(HttpContext context, Exception exception)
         {
-            // ✅ Fix: verificar que la respuesta no haya comenzado a enviarse.
-            // Si ya se inició, no se puede cambiar el StatusCode ni escribir más.
+   
             if (context.Response.HasStarted)
             {
                 _logger.LogWarning("La respuesta ya fue iniciada. No se puede manejar la excepción correctamente.");
@@ -56,21 +55,12 @@ namespace TorneoPro.API.Middleware
                     response = ApiRespuesta<object>.Error(notFoundEx.Message ?? "Recurso no encontrado");
                     break;
 
-                case FluentValidation.ValidationException validationEx:
-                    context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                    response = ApiRespuesta<object>.Error(
-                        "Error de validación",
-                        validationEx.Errors.Select(e => e.ErrorMessage).ToList());
-                    break;
-
                 case ArgumentException or ArgumentNullException:
                     context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
                     response = ApiRespuesta<object>.Error(exception.Message);
                     break;
 
-                // ✅ Fix: separar InvalidOperationException — antes estaba agrupada con
-                // ArgumentException dando BadRequest, pero una InvalidOperationException
-                // de negocio (ej: "El torneo ya está cerrado") es semánticamente un Conflict.
+              
                 case InvalidOperationException:
                     context.Response.StatusCode = (int)HttpStatusCode.Conflict;
                     response = ApiRespuesta<object>.Error(exception.Message);
@@ -90,9 +80,7 @@ namespace TorneoPro.API.Middleware
                     break;
 
                 case OperationCanceledException:
-                    // ✅ Fix: el cliente canceló la request (ej. cerró el navegador).
-                    // No es un error real — registrar como info, no como error.
-                    context.Response.StatusCode = 499; // Client Closed Request (convención nginx)
+                    context.Response.StatusCode = 499; 
                     _logger.LogInformation("La solicitud fue cancelada por el cliente en {Path}",
                         context.Request.Path);
                     response = ApiRespuesta<object>.Error("La solicitud fue cancelada.");
@@ -100,7 +88,6 @@ namespace TorneoPro.API.Middleware
 
                 default:
                     context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-                    // ✅ Fix: nunca exponer detalles internos en producción
                     response = ApiRespuesta<object>.Error("Ocurrió un error interno en el servidor.");
                     break;
             }

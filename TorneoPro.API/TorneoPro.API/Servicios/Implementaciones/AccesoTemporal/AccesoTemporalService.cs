@@ -3,67 +3,303 @@ using System.Text.Json;
 using TorneoPro.API.Controllers;
 using TorneoPro.API.Data;
 using TorneoPro.API.DTOs.AccesoTemporal.Request;
+using TorneoPro.API.DTOs.AccesoTemporal.Response;
 using TorneoPro.API.DTOs.Shared;
 using TorneoPro.API.Helpers;
 using TorneoPro.API.Models;
 using TorneoPro.API.Servicios.Interfaces.AccesoTemporal;
 using TorneoPro.API.Servicios.Interfaces.Email;
+using DeepLinkInfoResponse = TorneoPro.API.DTOs.AccesoTemporal.Response.DeepLinkInfoResponse;
 
 namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
 {
+    /// <summary>
+    /// Servicio para la gestión de accesos temporales, invitaciones y enlaces compartidos
+    /// </summary>
     public class AccesoTemporalService : IAccesoTemporalService
     {
         private readonly TorneoProContext _contexto;
         private readonly ILogger<AccesoTemporalService> _logger;
         private readonly IConfiguration _configuracion;
         private readonly IEmailService _emailService;
-        private readonly IAccesoTemporalService _accesoTemporalService;
         private readonly IHttpContextAccessor _httpContextAccessor;
+
+        // Caché para IDs
+        private static Dictionary<string, int>? _cacheTiposEnlace;
+        private static Dictionary<string, int>? _cacheRoles;
+        private static readonly SemaphoreSlim _cacheLock = new(1, 1);
 
         public AccesoTemporalService(
             TorneoProContext contexto,
             ILogger<AccesoTemporalService> logger,
             IConfiguration configuracion,
             IEmailService emailService,
-            IAccesoTemporalService accesoTemporalService,
             IHttpContextAccessor httpContextAccessor)
         {
             _contexto = contexto;
             _logger = logger;
             _configuracion = configuracion;
             _emailService = emailService;
-            _accesoTemporalService = accesoTemporalService;
             _httpContextAccessor = httpContextAccessor;
         }
+
+        #region Métodos Privados Helpers
 
         private string ObtenerBaseUrl()
         {
             var request = _httpContextAccessor.HttpContext?.Request;
-            if (request == null) return "http://localhost:5293";
+            if (request == null) return _configuracion["AppConfig:AppUrl"] ?? "https://torneopro.com";
             return $"{request.Scheme}://{request.Host}";
         }
 
-
-        public async Task<EnlaceTemporalResponse> CrearEnlaceTemporalAsync(int usuarioIdCreador, EnlaceTemporalRequest solicitud, string? ipAddress = null, string? userAgent = null)
+        private (string BaseUrl, string DeepLinkScheme, string DeepLinkHost, string InviteUrl, string DeepLink) ObtenerUrls(string token)
         {
-            // Validar permisos del creador
-            var esAdmin = await EsAdminAsync(usuarioIdCreador);
-            if (!esAdmin)
+            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
+            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
+            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
+
+            var inviteUrl = string.IsNullOrEmpty(token) ? baseUrl : $"{baseUrl}/invite/{token}";
+            var deepLink = string.IsNullOrEmpty(token) ? $"{deepLinkScheme}://{deepLinkHost}" : $"{deepLinkScheme}://{deepLinkHost}/open?token={token}";
+
+            return (baseUrl, deepLinkScheme, deepLinkHost, inviteUrl, deepLink);
+        }
+
+        private string GenerarTokenUnico()
+        {
+            string token;
+            bool existe;
+            do
+            {
+                token = Convert.ToBase64String(Guid.NewGuid().ToByteArray())
+                    .Replace("+", "-")
+                    .Replace("/", "_")
+                    .Replace("=", "")
+                    .ToLowerInvariant();
+                existe = _contexto.enlaces_compartidos.Any(e => e.codigo_enlace == token);
+            } while (existe);
+
+            return token;
+        }
+
+        private async Task<int> ObtenerIdTipoEnlaceAsync(string codigo)
+        {
+            await _cacheLock.WaitAsync();
+            try
+            {
+                if (_cacheTiposEnlace == null)
+                {
+                    _cacheTiposEnlace = await _contexto.tipos_enlaces
+                        .Where(t => t.activo == true)
+                        .ToDictionaryAsync(t => t.codigo, t => t.id);
+                }
+
+                if (_cacheTiposEnlace.TryGetValue(codigo, out var id))
+                    return id;
+
+                throw new KeyNotFoundException($"Tipo de enlace '{codigo}' no encontrado");
+            }
+            finally
+            {
+                _cacheLock.Release();
+            }
+        }
+
+        private async Task<int> ObtenerIdRolPorCodigoAsync(string codigo)
+        {
+            await _cacheLock.WaitAsync();
+            try
+            {
+                if (_cacheRoles == null)
+                {
+                    _cacheRoles = await _contexto.tipos_rols
+                        .Where(r => r.activo == true)
+                        .ToDictionaryAsync(r => r.codigo, r => r.id);
+                }
+
+                if (_cacheRoles.TryGetValue(codigo, out var id))
+                    return id;
+
+                throw new KeyNotFoundException($"Rol '{codigo}' no encontrado");
+            }
+            finally
+            {
+                _cacheLock.Release();
+            }
+        }
+
+        private async Task<bool> EsAdminAsync(int usuarioId)
+        {
+            return await _contexto.usuarios_roles
+                .AnyAsync(ur => ur.id_usuario == usuarioId &&
+                               (ur.id_rol == 1 || ur.id_rol == 2) &&
+                               ur.estado == "ACTIVO");
+        }
+
+        private int ObtenerMaxUsosPorTipo(TipoEntidad tipoEntidad, TipoUsuario destinatario)
+        {
+            return (tipoEntidad, destinatario) switch
+            {
+                (TipoEntidad.EQUIPO, TipoUsuario.JUGADOR) => 1,
+                (TipoEntidad.PARTIDO, TipoUsuario.ARBITRO) => 10,
+                (TipoEntidad.PARTIDO, TipoUsuario.CAPITAN) => 5,
+                (TipoEntidad.PARTIDO, TipoUsuario.JUGADOR) => 1,
+                _ => 10
+            };
+        }
+
+        private async Task ValidarEntidadAsync(TipoEntidad tipoEntidad, int idEntidad)
+        {
+            switch (tipoEntidad)
+            {
+                case TipoEntidad.PARTIDO:
+                    if (!await _contexto.partidos.AnyAsync(p => p.id == idEntidad))
+                        throw new KeyNotFoundException("Partido no encontrado");
+                    break;
+                case TipoEntidad.TORNEO:
+                    if (!await _contexto.torneos.AnyAsync(t => t.id == idEntidad))
+                        throw new KeyNotFoundException("Torneo no encontrado");
+                    break;
+                case TipoEntidad.ACTA_DIGITAL:
+                    if (!await _contexto.actas_partidos.AnyAsync(a => a.id == idEntidad))
+                        throw new KeyNotFoundException("Acta no encontrada");
+                    break;
+                case TipoEntidad.EQUIPO:
+                    if (!await _contexto.equipos.AnyAsync(e => e.id == idEntidad))
+                        throw new KeyNotFoundException("Equipo no encontrado");
+                    break;
+            }
+        }
+
+        private async Task<string> ObtenerNombreEntidadAsync(TipoEntidad tipoEntidad, int idEntidad)
+        {
+            return tipoEntidad switch
+            {
+                TipoEntidad.PARTIDO => await ObtenerNombrePartidoAsync(idEntidad),
+                TipoEntidad.TORNEO => await ObtenerNombreTorneoAsync(idEntidad),
+                TipoEntidad.ACTA_DIGITAL => await ObtenerNombreActaAsync(idEntidad),
+                TipoEntidad.EQUIPO => await ObtenerNombreEquipoAsync(idEntidad),
+                _ => "Entidad no especificada"
+            };
+        }
+
+        private async Task<string> ObtenerNombrePartidoAsync(int idPartido)
+        {
+            var partido = await _contexto.partidos
+                .Include(p => p.id_equipo_localNavigation)
+                .Include(p => p.id_equipo_visitanteNavigation)
+                .FirstOrDefaultAsync(p => p.id == idPartido);
+            return partido != null
+                ? $"{partido.id_equipo_localNavigation?.nombre} vs {partido.id_equipo_visitanteNavigation?.nombre}"
+                : "Partido no encontrado";
+        }
+
+        private async Task<string> ObtenerNombreTorneoAsync(int idTorneo)
+        {
+            var torneo = await _contexto.torneos.FindAsync(idTorneo);
+            return torneo?.nombre ?? "Torneo no encontrado";
+        }
+
+        private async Task<string> ObtenerNombreActaAsync(int idActa)
+        {
+            var acta = await _contexto.actas_partidos
+                .Include(a => a.id_partidoNavigation)
+                    .ThenInclude(p => p.id_equipo_localNavigation)
+                .FirstOrDefaultAsync(a => a.id == idActa);
+            return acta?.id_partidoNavigation != null
+                ? $"Acta - {acta.id_partidoNavigation.id_equipo_localNavigation?.nombre} vs {acta.id_partidoNavigation.id_equipo_visitanteNavigation?.nombre}"
+                : "Acta no encontrada";
+        }
+
+        private async Task<string> ObtenerNombreEquipoAsync(int idEquipo)
+        {
+            var equipo = await _contexto.equipos.FindAsync(idEquipo);
+            return equipo?.nombre ?? "Equipo no encontrado";
+        }
+
+        private string ObtenerTituloInvitacion(TipoEntidad tipoEntidad, string nombreEntidad)
+        {
+            return tipoEntidad switch
+            {
+                TipoEntidad.PARTIDO => $"Partido: {nombreEntidad}",
+                TipoEntidad.TORNEO => $"Torneo: {nombreEntidad}",
+                TipoEntidad.EQUIPO => $"Invitación al equipo {nombreEntidad}",
+                TipoEntidad.ACTA_DIGITAL => $"Acta Digital - {nombreEntidad}",
+                _ => "Invitación TorneoPro"
+            };
+        }
+
+        private string ObtenerMensajeInvitacion(TipoEntidad tipoEntidad)
+        {
+            return tipoEntidad switch
+            {
+                TipoEntidad.PARTIDO => "Has sido asignado a este partido",
+                TipoEntidad.TORNEO => "Has sido invitado a este torneo",
+                TipoEntidad.EQUIPO => "Un administrador te ha invitado a unirte a este equipo",
+                TipoEntidad.ACTA_DIGITAL => "El acta de este partido está disponible para tu revisión",
+                _ => "Tienes una invitación pendiente"
+            };
+        }
+
+        private async Task RegistrarUsoEnlace(int? enlaceId, int usuarioId, bool exitoso, string? motivo, string? ipAddress, string? userAgent)
+        {
+            if (!enlaceId.HasValue || enlaceId.Value == 0) return;
+
+            var rolesUsuario = await _contexto.usuarios_roles
+                .Where(ur => ur.id_usuario == usuarioId && ur.estado == "ACTIVO")
+                .Select(ur => ur.id_rol)
+                .ToListAsync();
+
+            var rolJugador = await ObtenerIdRolPorCodigoAsync("JUGADOR");
+            int? rolAnterior = rolesUsuario.Any() ? rolesUsuario.First() : null;
+            int rolNuevo = rolesUsuario.Any() ? rolesUsuario.First() : rolJugador;
+
+            var uso = new enlaces_historial_uso
+            {
+                codigo = CodigoHelper.GenerarCodigo("USE", 10),
+                id_enlace = enlaceId.Value,
+                id_usuario = usuarioId,
+                fecha_uso = DateTime.UtcNow,
+                ip_address = ipAddress?.Length > 50 ? ipAddress[..50] : ipAddress,
+                user_agent = userAgent?.Length > 500 ? userAgent[..500] : userAgent,
+                uso_exitoso = exitoso,
+                motivo_fallo = motivo,
+                id_rol_anterior = rolAnterior,
+                id_rol_nuevo = rolNuevo
+            };
+
+            await _contexto.enlaces_historial_usos.AddAsync(uso);
+            await _contexto.SaveChangesAsync();
+        }
+
+        #endregion
+
+        #region Creación de Enlaces
+
+        public async Task<EnlaceTemporalResponse> CrearEnlaceTemporalAsync(
+            int usuarioIdCreador,
+            EnlaceTemporalRequest solicitud,
+            string? ipAddress = null,
+            string? userAgent = null)
+        {
+            _logger.LogInformation("Creando enlace temporal - CreadorId: {CreadorId}, TipoEntidad: {TipoEntidad}, IdEntidad: {IdEntidad}",
+                usuarioIdCreador, solicitud.TipoEntidad, solicitud.IdEntidad);
+
+            if (!await EsAdminAsync(usuarioIdCreador))
                 throw new UnauthorizedAccessException("No tiene permisos para crear enlaces temporales");
 
-            // Validar entidad según tipo
             await ValidarEntidadAsync(solicitud.TipoEntidad, solicitud.IdEntidad);
 
-            // Validar usuario destino si se especificó
-            if (solicitud.IdUsuarioDestino.HasValue)
-            {
-                var usuarioDestino = await _contexto.usuarios.FindAsync(solicitud.IdUsuarioDestino.Value);
-                if (usuarioDestino == null)
-                    throw new KeyNotFoundException("Usuario destino no encontrado");
-            }
+            if (solicitud.IdUsuarioDestino.HasValue && !await _contexto.usuarios.AnyAsync(u => u.id == solicitud.IdUsuarioDestino.Value))
+                throw new KeyNotFoundException("Usuario destino no encontrado");
+
+            if (solicitud.HorasValidez < 1 || solicitud.HorasValidez > 720)
+                throw new InvalidOperationException("Las horas de validez deben estar entre 1 y 720");
 
             var token = GenerarTokenUnico();
             var fechaExpiracion = DateTime.UtcNow.AddHours(solicitud.HorasValidez);
+            var idTipoEnlace = await ObtenerIdTipoEnlaceAsync("ENLACE_TEMPORAL");
+            var idRolAsignado = await ObtenerIdRolPorCodigoAsync(solicitud.Destinatario.ToString());
+            var maxUsos = ObtenerMaxUsosPorTipo(solicitud.TipoEntidad, solicitud.Destinatario);
 
             var metadata = new Dictionary<string, object>
             {
@@ -71,19 +307,17 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 ["id_entidad"] = solicitud.IdEntidad,
                 ["destinatario"] = solicitud.Destinatario.ToString(),
                 ["horas_validez"] = solicitud.HorasValidez,
-                ["creado_por"] = usuarioIdCreador
+                ["creado_por"] = usuarioIdCreador,
+                ["fecha_creacion"] = DateTime.UtcNow
             };
 
             if (!string.IsNullOrEmpty(solicitud.Metadatos))
             {
                 try
                 {
-                    var extraMetadata = JsonSerializer.Deserialize<Dictionary<string, object>>(solicitud.Metadatos);
-                    if (extraMetadata != null)
-                    {
-                        foreach (var item in extraMetadata)
-                            metadata[item.Key] = item.Value;
-                    }
+                    var extra = JsonSerializer.Deserialize<Dictionary<string, object>>(solicitud.Metadatos);
+                    if (extra != null)
+                        foreach (var item in extra) metadata[item.Key] = item.Value;
                 }
                 catch { }
             }
@@ -92,14 +326,14 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             {
                 codigo = CodigoHelper.GenerarCodigo("TMP", 12),
                 codigo_enlace = token,
-                id_tipo_enlace = 10,
+                id_tipo_enlace = idTipoEnlace,
                 id_usuario_creador = usuarioIdCreador,
-                id_rol_asignado = (int)solicitud.Destinatario,
+                id_rol_asignado = idRolAsignado,
                 id_torneo = solicitud.TipoEntidad == TipoEntidad.TORNEO ? solicitud.IdEntidad : null,
-                id_equipo = null,
+                id_equipo = solicitud.TipoEntidad == TipoEntidad.EQUIPO ? solicitud.IdEntidad : null,
                 fecha_creacion = DateTime.UtcNow,
                 fecha_expiracion = fechaExpiracion,
-                max_usos = 10,
+                max_usos = maxUsos,
                 usos_actuales = 0,
                 estado = "ACTIVO",
                 metadata = JsonSerializer.Serialize(metadata),
@@ -109,129 +343,51 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             _contexto.enlaces_compartidos.Add(enlace);
             await _contexto.SaveChangesAsync();
 
-            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
+            var urls = ObtenerUrls(token);
             var entidadNombre = await ObtenerNombreEntidadAsync(solicitud.TipoEntidad, solicitud.IdEntidad);
-
-            // URL ÚNICA QUE SE ENVÍA AL USUARIO (web intermedia)
-            var inviteUrl = $"{baseUrl}/invite/{token}";
-            var deepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={token}";
 
             return new EnlaceTemporalResponse
             {
                 Id = enlace.id,
                 Token = token,
                 EnlaceUnico = token,
-                InviteUrl = inviteUrl,
-                DeepLink = deepLink,
+                InviteUrl = urls.InviteUrl,
+                DeepLink = urls.DeepLink,
                 FechaExpiracion = fechaExpiracion,
                 TipoEntidad = solicitud.TipoEntidad,
                 IdEntidad = solicitud.IdEntidad,
                 EntidadNombre = entidadNombre,
                 Destinatario = solicitud.Destinatario,
                 IdUsuarioDestino = solicitud.IdUsuarioDestino,
-                EsActivo = true,
-                InviteInfo = new InviteInfoResponse
-                {
-                    Token = token,
-                    Tipo = solicitud.TipoEntidad.ToString(),
-                    Titulo = ObtenerTituloInvitacion(solicitud.TipoEntidad, entidadNombre),
-                    Mensaje = ObtenerMensajeInvitacion(solicitud.TipoEntidad),
-                    NombreEntidad = entidadNombre,
-                    DeepLink = deepLink,
-                    RequiereAutenticacion = !(solicitud.Destinatario == TipoUsuario.JUGADOR && solicitud.IdUsuarioDestino.HasValue),
-                    FechaExpiracion = fechaExpiracion,
-                    EsValido = true
-                }
+                EsActivo = true
             };
         }
 
-        public async Task<InviteInfoResponse?> ObtenerInfoInvitacionAsync(string token)
-        {
-            var enlace = await _contexto.enlaces_compartidos
-                .FirstOrDefaultAsync(e => e.codigo_enlace == token && e.activo == true);
-
-            if (enlace == null)
-            {
-                return new InviteInfoResponse
-                {
-                    Token = token,
-                    EsValido = false,
-                    ErrorMensaje = "Enlace no encontrado"
-                };
-            }
-
-            if (enlace.estado != "ACTIVO")
-            {
-                return new InviteInfoResponse
-                {
-                    Token = token,
-                    EsValido = false,
-                    ErrorMensaje = $"El enlace está {enlace.estado.ToLowerInvariant()}"
-                };
-            }
-
-            if (enlace.fecha_expiracion.HasValue && enlace.fecha_expiracion.Value < DateTime.UtcNow)
-            {
-                enlace.estado = "EXPIRADO";
-                await _contexto.SaveChangesAsync();
-                return new InviteInfoResponse
-                {
-                    Token = token,
-                    EsValido = false,
-                    ErrorMensaje = "El enlace ha expirado"
-                };
-            }
-
-            var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(enlace.metadata ?? "{}");
-            var tipoEntidadStr = metadata?.GetValueOrDefault("tipo_entidad")?.ToString();
-            var tipoEntidad = tipoEntidadStr switch
-            {
-                "PARTIDO" => TipoEntidad.PARTIDO,
-                "TORNEO" => TipoEntidad.TORNEO,
-                "EQUIPO" => TipoEntidad.EQUIPO,
-                _ => TipoEntidad.PARTIDO
-            };
-            var idEntidad = metadata?.TryGetValue("id_entidad", out var idVal) == true && idVal is JsonElement idElem
-    ? idElem.TryGetInt32(out var idInt) ? idInt : 0
-    : 0;
-
-            var entidadNombre = await ObtenerNombreEntidadAsync(tipoEntidad, idEntidad);
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
-            var deepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={token}";
-
-            return new InviteInfoResponse
-            {
-                Token = token,
-                Tipo = tipoEntidad.ToString(),
-                Titulo = ObtenerTituloInvitacion(tipoEntidad, entidadNombre),
-                Mensaje = ObtenerMensajeInvitacion(tipoEntidad),
-                NombreEntidad = entidadNombre,
-                DeepLink = deepLink,
-                RequiereAutenticacion = true,
-                FechaExpiracion = enlace.fecha_expiracion ?? DateTime.UtcNow.AddDays(1),
-                EsValido = true
-            };
-        }
-
-        public async Task<EnlaceTemporalResponse> CrearEnlaceArbitroPartidoAsync(int usuarioIdCreador, int idPartido, int? idUsuarioDestino = null, string? ipAddress = null, string? userAgent = null)
+        public async Task<EnlaceTemporalResponse> CrearEnlaceArbitroPartidoAsync(
+            int usuarioIdCreador,
+            int idPartido,
+            int? idUsuarioDestino = null,
+            string? ipAddress = null,
+            string? userAgent = null)
         {
             var partido = await _contexto.partidos
-                .Include(p => p.id_torneoNavigation)
                 .Include(p => p.id_equipo_localNavigation)
                 .Include(p => p.id_equipo_visitanteNavigation)
                 .FirstOrDefaultAsync(p => p.id == idPartido && p.activo == true);
 
-            if (partido == null)
-                throw new KeyNotFoundException("Partido no encontrado");
-
+            if (partido == null) throw new KeyNotFoundException("Partido no encontrado");
             if (partido.estado == "FINALIZADO" || partido.estado == "CANCELADO")
                 throw new InvalidOperationException("No se pueden crear enlaces para partidos finalizados o cancelados");
 
             var horasHastaPartido = (partido.fecha_hora - DateTime.UtcNow).TotalHours;
             var horasValidez = Math.Max(48, horasHastaPartido + 4);
+
+            var metadatos = new
+            {
+                permite_editar_eventos = true,
+                permite_firmar_acta = true,
+                partido_info = $"{partido.id_equipo_localNavigation?.nombre} vs {partido.id_equipo_visitanteNavigation?.nombre}"
+            };
 
             var solicitud = new EnlaceTemporalRequest
             {
@@ -240,13 +396,85 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 Destinatario = TipoUsuario.ARBITRO,
                 IdUsuarioDestino = idUsuarioDestino,
                 HorasValidez = (int)Math.Ceiling(horasValidez),
-                Metadatos = JsonSerializer.Serialize(new
-                {
-                    permite_editar_eventos = true,
-                    permite_firmar_acta = true,
-                    id_arbitro_asignado = idUsuarioDestino,
-                    fecha_hora_partido = partido.fecha_hora
-                })
+                Metadatos = JsonSerializer.Serialize(metadatos)
+            };
+
+            return await CrearEnlaceTemporalAsync(usuarioIdCreador, solicitud, ipAddress, userAgent);
+        }
+
+        public async Task<EnlaceTemporalResponse> CrearEnlaceCapitanAlineacionAsync(
+            int usuarioIdCreador,
+            int idPartido,
+            int idEquipo,
+            int? idUsuarioDestino = null,
+            string? ipAddress = null,
+            string? userAgent = null)
+        {
+            var partido = await _contexto.partidos.FindAsync(idPartido);
+            if (partido == null) throw new KeyNotFoundException("Partido no encontrado");
+
+            var equipo = await _contexto.equipos.FindAsync(idEquipo);
+            if (equipo == null) throw new KeyNotFoundException("Equipo no encontrado");
+
+            var horasHastaPartido = (partido.fecha_hora - DateTime.UtcNow).TotalHours;
+            var horasValidez = Math.Max(1, horasHastaPartido - 1);
+
+            if (horasValidez <= 0)
+                throw new InvalidOperationException("Ya pasó la fecha límite para enviar la alineación");
+
+            var metadatos = new
+            {
+                permite_registrar_alineacion = true,
+                id_equipo = idEquipo,
+                nombre_equipo = equipo.nombre
+            };
+
+            var solicitud = new EnlaceTemporalRequest
+            {
+                IdEntidad = idPartido,
+                TipoEntidad = TipoEntidad.PARTIDO,
+                Destinatario = TipoUsuario.CAPITAN,
+                IdUsuarioDestino = idUsuarioDestino,
+                HorasValidez = (int)Math.Ceiling(horasValidez),
+                Metadatos = JsonSerializer.Serialize(metadatos)
+            };
+
+            return await CrearEnlaceTemporalAsync(usuarioIdCreador, solicitud, ipAddress, userAgent);
+        }
+
+        public async Task<EnlaceTemporalResponse> CrearEnlaceJugadorAsistenciaAsync(
+            int usuarioIdCreador,
+            int idPartido,
+            int idJugador,
+            string? ipAddress = null,
+            string? userAgent = null)
+        {
+            var partido = await _contexto.partidos.FindAsync(idPartido);
+            if (partido == null) throw new KeyNotFoundException("Partido no encontrado");
+
+            var jugador = await _contexto.usuarios.FindAsync(idJugador);
+            if (jugador == null) throw new KeyNotFoundException("Jugador no encontrado");
+
+            var horasHastaPartido = (partido.fecha_hora - DateTime.UtcNow).TotalHours;
+            var horasValidez = Math.Max(1, horasHastaPartido - 24);
+
+            if (horasValidez <= 0)
+                throw new InvalidOperationException("Ya pasó la fecha límite para confirmar asistencia");
+
+            var metadatos = new
+            {
+                permite_confirmar_asistencia = true,
+                id_jugador = idJugador
+            };
+
+            var solicitud = new EnlaceTemporalRequest
+            {
+                IdEntidad = idPartido,
+                TipoEntidad = TipoEntidad.PARTIDO,
+                Destinatario = TipoUsuario.JUGADOR,
+                IdUsuarioDestino = idJugador,
+                HorasValidez = (int)Math.Ceiling(horasValidez),
+                Metadatos = JsonSerializer.Serialize(metadatos)
             };
 
             return await CrearEnlaceTemporalAsync(usuarioIdCreador, solicitud, ipAddress, userAgent);
@@ -260,160 +488,40 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             string? userAgent = null)
         {
             var equipo = await _contexto.equipos.FindAsync(idEquipo);
-            if (equipo == null)
-                throw new KeyNotFoundException("Equipo no encontrado");
+            if (equipo == null) throw new KeyNotFoundException("Equipo no encontrado");
 
             var usuarioDestino = await _contexto.usuarios.FindAsync(idUsuarioDestino);
-            if (usuarioDestino == null)
-                throw new KeyNotFoundException("Usuario destino no encontrado");
+            if (usuarioDestino == null) throw new KeyNotFoundException("Usuario destino no encontrado");
 
-            var token = GenerarTokenUnico();
-            var fechaExpiracion = DateTime.UtcNow.AddDays(7);
-
-            var metadata = new Dictionary<string, object>
+            var metadatos = new
             {
-                ["tipo_entidad"] = TipoEntidad.EQUIPO.ToString(),
-                ["id_entidad"] = idEquipo,
-                ["nombre_equipo"] = equipo.nombre,
-                ["destinatario"] = TipoUsuario.JUGADOR.ToString(),
-                ["tipo_invitacion"] = "EQUIPO",
-                ["permite_unirse"] = true,
-                ["creado_por"] = usuarioIdCreador,
-                ["id_usuario_destino"] = idUsuarioDestino
+                tipo_invitacion = "EQUIPO",
+                nombre_equipo = equipo.nombre,
+                permite_unirse = true
             };
 
-            var enlace = new enlaces_compartido
+            var solicitud = new EnlaceTemporalRequest
             {
-                codigo = CodigoHelper.GenerarCodigo("INV", 12),
-                codigo_enlace = token,
-                id_tipo_enlace = 5,
-                id_usuario_creador = usuarioIdCreador,
-                id_rol_asignado = (int)TipoUsuario.JUGADOR,
-                id_equipo = idEquipo,
-                fecha_creacion = DateTime.UtcNow,
-                fecha_expiracion = fechaExpiracion,
-                max_usos = 1,
-                usos_actuales = 0,
-                estado = "ACTIVO",
-                metadata = JsonSerializer.Serialize(metadata),
-                activo = true
-            };
-
-            _contexto.enlaces_compartidos.Add(enlace);
-            await _contexto.SaveChangesAsync();
-
-            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
-
-            var inviteUrl = $"{baseUrl}/invite/{token}";
-            var deepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={token}";
-
-            return new EnlaceTemporalResponse
-            {
-                Id = enlace.id,
-                Token = token,
-                EnlaceUnico = token,
-                InviteUrl = inviteUrl,
-                DeepLink = deepLink,
-                FechaExpiracion = fechaExpiracion,
-                TipoEntidad = TipoEntidad.EQUIPO,
                 IdEntidad = idEquipo,
-                EntidadNombre = equipo.nombre,
+                TipoEntidad = TipoEntidad.EQUIPO,
                 Destinatario = TipoUsuario.JUGADOR,
                 IdUsuarioDestino = idUsuarioDestino,
-                EsActivo = true,
-                InviteInfo = new InviteInfoResponse
-                {
-                    Token = token,
-                    Tipo = "EQUIPO",
-                    Titulo = $"Invitación al equipo {equipo.nombre}",
-                    Mensaje = "Has sido invitado a unirte a este equipo",
-                    NombreEntidad = equipo.nombre,
-                    DeepLink = deepLink,
-                    RequiereAutenticacion = true,
-                    FechaExpiracion = fechaExpiracion,
-                    EsValido = true
-                }
-            };
-        }
-
-        public async Task<EnlaceTemporalResponse> CrearEnlaceCapitanAlineacionAsync(int usuarioIdCreador, int idPartido, int idEquipo, int? idUsuarioDestino = null, string? ipAddress = null, string? userAgent = null)
-        {
-            var partido = await _contexto.partidos
-                .Include(p => p.id_equipo_localNavigation)
-                .Include(p => p.id_equipo_visitanteNavigation)
-                .FirstOrDefaultAsync(p => p.id == idPartido && p.activo == true);
-
-            if (partido == null)
-                throw new KeyNotFoundException("Partido no encontrado");
-
-            var equipo = await _contexto.equipos.FindAsync(idEquipo);
-            if (equipo == null)
-                throw new KeyNotFoundException("Equipo no encontrado");
-
-            var horasHastaPartido = (partido.fecha_hora - DateTime.UtcNow).TotalHours;
-            var horasValidez = Math.Max(1, horasHastaPartido - 1);
-
-            if (horasValidez <= 0)
-                throw new InvalidOperationException("Ya pasó la fecha límite para enviar la alineación");
-
-            var solicitud = new EnlaceTemporalRequest
-            {
-                IdEntidad = idPartido,
-                TipoEntidad = TipoEntidad.PARTIDO,
-                Destinatario = TipoUsuario.CAPITAN,
-                IdUsuarioDestino = idUsuarioDestino,
-                HorasValidez = (int)Math.Ceiling(horasValidez),
-                Metadatos = JsonSerializer.Serialize(new
-                {
-                    permite_registrar_alineacion = true,
-                    id_equipo = idEquipo,
-                    nombre_equipo = equipo.nombre,
-                    fecha_limite = partido.fecha_hora.AddHours(-1)
-                })
+                HorasValidez = 168,
+                Metadatos = JsonSerializer.Serialize(metadatos)
             };
 
             return await CrearEnlaceTemporalAsync(usuarioIdCreador, solicitud, ipAddress, userAgent);
         }
 
-        public async Task<EnlaceTemporalResponse> CrearEnlaceJugadorAsistenciaAsync(int usuarioIdCreador, int idPartido, int idJugador, string? ipAddress = null, string? userAgent = null)
-        {
-            var partido = await _contexto.partidos
-                .FirstOrDefaultAsync(p => p.id == idPartido && p.activo == true);
+        #endregion
 
-            if (partido == null)
-                throw new KeyNotFoundException("Partido no encontrado");
+        #region Uso y Consulta
 
-            var jugador = await _contexto.usuarios.FindAsync(idJugador);
-            if (jugador == null)
-                throw new KeyNotFoundException("Jugador no encontrado");
-
-            var horasHastaPartido = (partido.fecha_hora - DateTime.UtcNow).TotalHours;
-            var horasValidez = Math.Max(1, horasHastaPartido - 24);
-
-            if (horasValidez <= 0)
-                throw new InvalidOperationException("Ya pasó la fecha límite para confirmar asistencia");
-
-            var solicitud = new EnlaceTemporalRequest
-            {
-                IdEntidad = idPartido,
-                TipoEntidad = TipoEntidad.PARTIDO,
-                Destinatario = TipoUsuario.JUGADOR,
-                IdUsuarioDestino = idJugador,
-                HorasValidez = (int)Math.Ceiling(horasValidez),
-                Metadatos = JsonSerializer.Serialize(new
-                {
-                    permite_confirmar_asistencia = true,
-                    id_jugador = idJugador,
-                    nombre_jugador = $"{jugador.nombres} {jugador.apellidos}"
-                })
-            };
-
-            return await CrearEnlaceTemporalAsync(usuarioIdCreador, solicitud, ipAddress, userAgent);
-        }
-
-        public async Task<UsarEnlaceTemporalResponse> UsarEnlaceTemporalAsync(string token, int usuarioId, string? ipAddress = null, string? userAgent = null)
+        public async Task<UsarEnlaceTemporalResponse> UsarEnlaceTemporalAsync(
+            string token,
+            int usuarioId,
+            string? ipAddress = null,
+            string? userAgent = null)
         {
             var enlace = await _contexto.enlaces_compartidos
                 .FirstOrDefaultAsync(e => e.codigo_enlace == token && e.activo == true);
@@ -427,7 +535,7 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             if (enlace.estado != "ACTIVO")
             {
                 await RegistrarUsoEnlace(enlace.id, usuarioId, false, $"Enlace {enlace.estado}", ipAddress, userAgent);
-                return new UsarEnlaceTemporalResponse { Exitoso = false, Mensaje = $"El enlace está {enlace.estado.ToLowerInvariant()}" };
+                return new UsarEnlaceTemporalResponse { Exitoso = false, Mensaje = $"El enlace está {enlace.estado?.ToLowerInvariant()}" };
             }
 
             if (enlace.fecha_expiracion.HasValue && enlace.fecha_expiracion.Value < DateTime.UtcNow)
@@ -438,7 +546,7 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 return new UsarEnlaceTemporalResponse { Exitoso = false, Mensaje = "El enlace ha expirado" };
             }
 
-            if (enlace.max_usos.HasValue && enlace.usos_actuales >= enlace.max_usos.Value)
+            if (enlace.max_usos.HasValue && (enlace.usos_actuales ?? 0) >= enlace.max_usos.Value)
             {
                 enlace.estado = "AGOTADO";
                 await _contexto.SaveChangesAsync();
@@ -446,75 +554,43 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 return new UsarEnlaceTemporalResponse { Exitoso = false, Mensaje = "El enlace ha alcanzado el número máximo de usos" };
             }
 
-            Dictionary<string, object>? metadata = null;
-            if (!string.IsNullOrEmpty(enlace.metadata))
-            {
-                try
-                {
-                    metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(enlace.metadata);
-                }
-                catch { }
-            }
-
+            var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(enlace.metadata ?? "{}");
             var tipoEntidadStr = metadata?.GetValueOrDefault("tipo_entidad")?.ToString();
             var tipoEntidad = tipoEntidadStr switch
             {
                 "PARTIDO" => TipoEntidad.PARTIDO,
                 "TORNEO" => TipoEntidad.TORNEO,
-                "PLANILLA" => TipoEntidad.PLANILLA,
-                "INFORME" => TipoEntidad.INFORME,
-                "SANCION" => TipoEntidad.SANCION,
-                "CONVOCATORIA" => TipoEntidad.CONVOCATORIA,
-                "ACTA_DIGITAL" => TipoEntidad.ACTA_DIGITAL,
                 "EQUIPO" => TipoEntidad.EQUIPO,
+                "ACTA_DIGITAL" => TipoEntidad.ACTA_DIGITAL,
                 _ => TipoEntidad.PARTIDO
             };
 
-            var idEntidad = metadata?.TryGetValue("id_entidad", out var idEntVal) == true && idEntVal is JsonElement idEntElem
-    ? idEntElem.TryGetInt32(out var idEntInt) ? idEntInt : 0
-    : 0;
+            var idEntidad = 0;
+            if (metadata?.TryGetValue("id_entidad", out var idVal) == true && idVal is JsonElement idElem)
+                idEntidad = idElem.TryGetInt32(out var idInt) ? idInt : 0;
 
-            enlace.usos_actuales++;
+            enlace.usos_actuales = (enlace.usos_actuales ?? 0) + 1;
+            if (enlace.max_usos.HasValue && enlace.usos_actuales >= enlace.max_usos.Value)
+                enlace.estado = "AGOTADO";
+
             await _contexto.SaveChangesAsync();
-
             await RegistrarUsoEnlace(enlace.id, usuarioId, true, null, ipAddress, userAgent);
 
-            var respuesta = new UsarEnlaceTemporalResponse
+            return new UsarEnlaceTemporalResponse
             {
                 Exitoso = true,
                 TipoEntidad = tipoEntidad,
                 IdEntidad = idEntidad,
                 Mensaje = "Acceso concedido"
             };
-
-            switch (tipoEntidad)
-            {
-                case TipoEntidad.PARTIDO:
-                    respuesta.PartidoData = await ConstruirAccesoPartidoAsync(idEntidad, metadata);
-                    break;
-                case TipoEntidad.TORNEO:
-                    respuesta.TorneoData = await ConstruirAccesoTorneoAsync(idEntidad, metadata);
-                    break;
-                case TipoEntidad.ACTA_DIGITAL:
-                    respuesta.ActaData = await ConstruirAccesoActaAsync(idEntidad, metadata);
-                    break;
-                case TipoEntidad.EQUIPO:
-                    respuesta.EquipoData = await ConstruirAccesoEquipoAsync(idEntidad, metadata);
-                    break;
-            }
-
-            respuesta.DatosAcceso = metadata;
-            return respuesta;
         }
 
         public async Task<EnlaceTemporalResponse?> ObtenerInfoEnlaceAsync(string token)
         {
             var enlace = await _contexto.enlaces_compartidos
-                .Include(e => e.id_usuario_creadorNavigation)
                 .FirstOrDefaultAsync(e => e.codigo_enlace == token && e.activo == true);
 
-            if (enlace == null)
-                return null;
+            if (enlace == null) return null;
 
             var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(enlace.metadata ?? "{}");
             var tipoEntidadStr = metadata?.GetValueOrDefault("tipo_entidad")?.ToString();
@@ -525,9 +601,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 "EQUIPO" => TipoEntidad.EQUIPO,
                 _ => TipoEntidad.PARTIDO
             };
-            var idEntidad = metadata?.TryGetValue("id_entidad", out var idEntVal) == true && idEntVal is JsonElement idEntElem
-    ? idEntElem.TryGetInt32(out var idEntInt) ? idEntInt : 0
-    : 0;
+
+            var idEntidad = 0;
+            if (metadata?.TryGetValue("id_entidad", out var idVal) == true && idVal is JsonElement idElem)
+                idEntidad = idElem.TryGetInt32(out var idInt) ? idInt : 0;
+
             var destinatarioStr = metadata?.GetValueOrDefault("destinatario")?.ToString();
             var destinatario = destinatarioStr?.ToUpper() switch
             {
@@ -537,23 +615,19 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 "ARBITRO" => TipoUsuario.ARBITRO,
                 "CAPITAN" => TipoUsuario.CAPITAN,
                 "JUGADOR" => TipoUsuario.JUGADOR,
-                _ => throw new Exception($"Rol no válido: {destinatarioStr}")
+                _ => TipoUsuario.JUGADOR
             };
-            var entidadNombre = await ObtenerNombreEntidadAsync(tipoEntidad, idEntidad);
-            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
 
-            var inviteUrl = $"{baseUrl}/invite/{token}";
-            var deepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={token}";
+            var entidadNombre = await ObtenerNombreEntidadAsync(tipoEntidad, idEntidad);
+            var urls = ObtenerUrls(token);
 
             return new EnlaceTemporalResponse
             {
                 Id = enlace.id,
                 Token = enlace.codigo_enlace,
                 EnlaceUnico = enlace.codigo_enlace,
-                InviteUrl = inviteUrl,
-                DeepLink = deepLink,
+                InviteUrl = urls.InviteUrl,
+                DeepLink = urls.DeepLink,
                 FechaExpiracion = enlace.fecha_expiracion ?? DateTime.UtcNow.AddDays(1),
                 TipoEntidad = tipoEntidad,
                 IdEntidad = idEntidad,
@@ -563,17 +637,256 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             };
         }
 
-        public async Task<ResultadoPaginado<EnlaceTemporalResponse>> ObtenerMisEnlacesAsync(int usuarioId, FiltrarEnlaceTemporalRequest solicitud)
+        public async Task<InviteInfoResponse?> ObtenerInfoInvitacionAsync(string token)
         {
+            var enlace = await _contexto.enlaces_compartidos
+                .Include(e => e.id_tipo_enlaceNavigation)
+                .Include(e => e.id_rol_asignadoNavigation)
+                .Include(e => e.id_torneoNavigation)
+                .Include(e => e.id_equipoNavigation)
+                .FirstOrDefaultAsync(e => e.codigo_enlace == token && e.activo == true);
+
+            if (enlace == null)
+                return new InviteInfoResponse { EsValido = false, ErrorMensaje = "Enlace no encontrado" };
+
+            if (enlace.estado != "ACTIVO")
+                return new InviteInfoResponse { EsValido = false, ErrorMensaje = $"El enlace está {enlace.estado?.ToLowerInvariant()}" };
+
+            if (enlace.fecha_expiracion.HasValue && enlace.fecha_expiracion.Value < DateTime.UtcNow)
+                return new InviteInfoResponse { EsValido = false, ErrorMensaje = "El enlace ha expirado" };
+
+            if (enlace.max_usos.HasValue && (enlace.usos_actuales ?? 0) >= enlace.max_usos.Value)
+                return new InviteInfoResponse { EsValido = false, ErrorMensaje = "El enlace ha alcanzado el número máximo de usos" };
+
+            var metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(enlace.metadata ?? "{}");
+            var tipoEntidadStr = metadata?.GetValueOrDefault("tipo_entidad")?.ToString();
+            var tipoEntidad = tipoEntidadStr switch
+            {
+                "PARTIDO" => TipoEntidad.PARTIDO,
+                "TORNEO" => TipoEntidad.TORNEO,
+                "EQUIPO" => TipoEntidad.EQUIPO,
+                "ACTA_DIGITAL" => TipoEntidad.ACTA_DIGITAL,
+                _ => TipoEntidad.PARTIDO
+            };
+
+            var idEntidad = 0;
+            if (metadata?.TryGetValue("id_entidad", out var idVal) == true && idVal is JsonElement idElem)
+                idEntidad = idElem.TryGetInt32(out var idInt) ? idInt : 0;
+
+            var entidadNombre = await ObtenerNombreEntidadAsync(tipoEntidad, idEntidad);
+            var urls = ObtenerUrls(token);
+
+            return new InviteInfoResponse
+            {
+                Token = token,
+                Tipo = tipoEntidad.ToString(),
+                Titulo = ObtenerTituloInvitacion(tipoEntidad, entidadNombre),
+                Mensaje = ObtenerMensajeInvitacion(tipoEntidad),
+                NombreEntidad = entidadNombre,
+                DeepLink = urls.DeepLink,
+                RequiereAutenticacion = true,
+                FechaExpiracion = enlace.fecha_expiracion ?? DateTime.UtcNow.AddDays(1),
+                EsValido = true
+            };
+        }
+
+        public async Task<DeepLinkInfoResponse?> ObtenerInfoDeepLinkAsync(string token)
+        {
+            var info = await ObtenerInfoEnlaceAsync(token);
+            if (info == null) return null;
+
+            var urls = ObtenerUrls(token);
+
+            return new DeepLinkInfoResponse
+            {
+                Token = token,
+                Tipo = info.TipoEntidad.ToString(),
+                Titulo = info.TipoEntidad == TipoEntidad.EQUIPO ? $"Invitación al equipo {info.EntidadNombre}" : $"Invitación a {info.EntidadNombre}",
+                NombreEntidad = info.EntidadNombre,
+                FechaExpiracion = info.FechaExpiracion,
+                EsValido = info.EsActivo && info.FechaExpiracion > DateTime.UtcNow,
+                DeepLink = urls.DeepLink
+            };
+        }
+
+        #endregion
+
+        #region Registro Público
+
+        public async Task<RegistroPublicoResponse> RegistrarJugadorDesdeInvitacionAsync(
+            RegistroPublicoRequest request,
+            string? ipAddress = null,
+            string? userAgent = null)
+        {
+            // Primero validar el token de invitación
+            var enlace = await _contexto.enlaces_compartidos
+                .FirstOrDefaultAsync(e => e.codigo_enlace == request.TokenEquipo && e.activo == true);
+
+            if (enlace == null)
+                throw new KeyNotFoundException("Token de invitación no válido");
+
+            if (enlace.estado != "ACTIVO")
+                throw new InvalidOperationException($"La invitación está {enlace.estado?.ToLowerInvariant()}");
+
+            if (enlace.fecha_expiracion.HasValue && enlace.fecha_expiracion.Value < DateTime.UtcNow)
+                throw new InvalidOperationException("La invitación ha expirado");
+
+            if (enlace.max_usos.HasValue && (enlace.usos_actuales ?? 0) >= enlace.max_usos.Value)
+                throw new InvalidOperationException("La invitación ya ha sido utilizada");
+
+            // Verificar si el email ya existe
+            if (await _contexto.usuarios.AnyAsync(u => u.email == request.Email))
+                throw new InvalidOperationException("El email ya está registrado");
+
+            // Crear usuario
+            var salt = HashHelper.GenerateSalt();
+            var passwordHash = HashHelper.HashPassword(request.Password, salt);
+
+            var usuario = new usuario
+            {
+                codigo = CodigoHelper.GenerarCodigo("USR", 8),
+                id_tipo_usuario = 2,
+                nombres = request.Nombres,
+                apellidos = request.Apellidos,
+                email = request.Email,
+                telefono = request.Telefono,
+                password_hash = passwordHash,
+                salt = salt,
+                activo = true,
+                email_verificado = true,
+                fecha_registro = DateTime.UtcNow
+            };
+
+            _contexto.usuarios.Add(usuario);
+            await _contexto.SaveChangesAsync();
+
+            // Asignar rol JUGADOR
+            var rolJugador = await ObtenerIdRolPorCodigoAsync("JUGADOR");
+            var usuarioRol = new usuarios_role
+            {
+                codigo = CodigoHelper.GenerarCodigo("UR", 8),
+                id_usuario = usuario.id,
+                id_rol = rolJugador,
+                fecha_inicio = DateOnly.FromDateTime(DateTime.UtcNow),
+                estado = "ACTIVO",
+                origen_asignacion = "INVITACION",
+                id_enlace_origen = enlace.id,
+                activo = true
+            };
+            _contexto.usuarios_roles.Add(usuarioRol);
+
+            // Obtener el equipo del enlace
+            var equipo = await _contexto.equipos.FindAsync(enlace.id_equipo);
+            if (equipo != null)
+            {
+                var jugadorEquipo = new jugadores_equipo
+                {
+                    codigo = CodigoHelper.GenerarCodigo("JE", 8),
+                    id_jugador = usuario.id,
+                    id_equipo = equipo.id,
+                    fecha_inicio = DateTime.UtcNow,
+                    estado = "ACTIVO",
+                    activo = true
+                };
+                _contexto.jugadores_equipos.Add(jugadorEquipo);
+            }
+
+            // Marcar enlace como usado
+            enlace.usos_actuales = (enlace.usos_actuales ?? 0) + 1;
+            if (enlace.max_usos.HasValue && enlace.usos_actuales >= enlace.max_usos.Value)
+                enlace.estado = "AGOTADO";
+
+            await _contexto.SaveChangesAsync();
+            await RegistrarUsoEnlace(enlace.id, usuario.id, true, null, ipAddress, userAgent);
+
+            return new RegistroPublicoResponse
+            {
+                Id = usuario.id,
+                Email = usuario.email,
+                NombreCompleto = $"{usuario.nombres} {usuario.apellidos}",
+                IdEquipo = equipo?.id ?? 0,
+                NombreEquipo = equipo?.nombre ?? "",
+                Mensaje = "Bienvenido a TorneoPro"
+            };
+        }
+
+        public async Task<UnirseEquipoResponse> UnirseAEquipoAsync(
+            string tokenEquipo,
+            int usuarioId,
+            string? ipAddress = null,
+            string? userAgent = null)
+        {
+            var enlace = await _contexto.enlaces_compartidos
+                .FirstOrDefaultAsync(e => e.codigo_enlace == tokenEquipo && e.activo == true);
+
+            if (enlace == null)
+                throw new KeyNotFoundException("Token de invitación no válido");
+
+            if (enlace.estado != "ACTIVO")
+                throw new InvalidOperationException($"La invitación está {enlace.estado?.ToLowerInvariant()}");
+
+            if (enlace.fecha_expiracion.HasValue && enlace.fecha_expiracion.Value < DateTime.UtcNow)
+                throw new InvalidOperationException("La invitación ha expirado");
+
+            if (enlace.max_usos.HasValue && (enlace.usos_actuales ?? 0) >= enlace.max_usos.Value)
+                throw new InvalidOperationException("La invitación ya ha sido utilizada");
+
+            var usuario = await _contexto.usuarios.FindAsync(usuarioId);
+            if (usuario == null)
+                throw new KeyNotFoundException("Usuario no encontrado");
+
+            var equipo = await _contexto.equipos.FindAsync(enlace.id_equipo);
+            if (equipo == null)
+                throw new KeyNotFoundException("Equipo no encontrado");
+
+            // Verificar si ya es miembro
+            var yaMiembro = await _contexto.jugadores_equipos
+                .AnyAsync(je => je.id_jugador == usuarioId && je.id_equipo == equipo.id && je.activo == true);
+
+            if (yaMiembro)
+                throw new InvalidOperationException("El usuario ya es miembro del equipo");
+
+            var jugadorEquipo = new jugadores_equipo
+            {
+                codigo = CodigoHelper.GenerarCodigo("JE", 8),
+                id_jugador = usuarioId,
+                id_equipo = equipo.id,
+                fecha_inicio = DateTime.UtcNow,
+                estado = "ACTIVO",
+                activo = true
+            };
+            _contexto.jugadores_equipos.Add(jugadorEquipo);
+
+            enlace.usos_actuales = (enlace.usos_actuales ?? 0) + 1;
+            if (enlace.max_usos.HasValue && enlace.usos_actuales >= enlace.max_usos.Value)
+                enlace.estado = "AGOTADO";
+
+            await _contexto.SaveChangesAsync();
+            await RegistrarUsoEnlace(enlace.id, usuarioId, true, null, ipAddress, userAgent);
+
+            return new UnirseEquipoResponse
+            {
+                Id = usuarioId,
+                Email = usuario.email,
+                NombreCompleto = $"{usuario.nombres} {usuario.apellidos}",
+                IdEquipo = equipo.id,
+                NombreEquipo = equipo.nombre ?? ""
+            };
+        }
+
+        #endregion
+
+        #region Gestión
+
+        public async Task<ResultadoPaginado<EnlaceTemporalResponse>> ObtenerMisEnlacesAsync(
+            int usuarioId,
+            FiltrarEnlaceTemporalRequest solicitud)
+        {
+            var idTipoEnlaceTemporal = await ObtenerIdTipoEnlaceAsync("ENLACE_TEMPORAL");
+
             var query = _contexto.enlaces_compartidos
-                .Where(e => e.id_usuario_creador == usuarioId && e.id_tipo_enlace == 10 && e.activo == true)
+                .Where(e => e.id_usuario_creador == usuarioId && e.id_tipo_enlace == idTipoEnlaceTemporal && e.activo == true)
                 .AsQueryable();
-
-            if (solicitud.TipoEntidad.HasValue)
-                query = query.Where(e => e.metadata.Contains(solicitud.TipoEntidad.Value.ToString()));
-
-            if (solicitud.IdEntidad.HasValue)
-                query = query.Where(e => e.metadata.Contains($"\"id_entidad\":{solicitud.IdEntidad.Value}"));
 
             if (solicitud.SoloActivos == true)
                 query = query.Where(e => e.estado == "ACTIVO");
@@ -592,9 +905,7 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 .Take(solicitud.TamanoPagina)
                 .ToListAsync();
 
-            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
+            var urls = ObtenerUrls("");
             var items = new List<EnlaceTemporalResponse>();
 
             foreach (var enlace in enlaces)
@@ -608,13 +919,14 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                     "EQUIPO" => TipoEntidad.EQUIPO,
                     _ => TipoEntidad.PARTIDO
                 };
-                var idEntidad = metadata?.TryGetValue("id_entidad", out var idEntVal) == true && idEntVal is JsonElement idEntElem
-     ? idEntElem.TryGetInt32(out var idEntInt) ? idEntInt : 0
-     : 0;
+
+                var idEntidad = 0;
+                if (metadata?.TryGetValue("id_entidad", out var idVal) == true && idVal is JsonElement idElem)
+                    idEntidad = idElem.TryGetInt32(out var idInt) ? idInt : 0;
 
                 var entidadNombre = await ObtenerNombreEntidadAsync(tipoEntidad, idEntidad);
-                var inviteUrl = $"{baseUrl}/invite/{enlace.codigo_enlace}";
-                var deepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={enlace.codigo_enlace}";
+                var inviteUrl = $"{urls.BaseUrl}/invite/{enlace.codigo_enlace}";
+                var deepLink = $"{urls.DeepLinkScheme}://{urls.DeepLinkHost}/open?token={enlace.codigo_enlace}";
 
                 items.Add(new EnlaceTemporalResponse
                 {
@@ -649,7 +961,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             await _contexto.SaveChangesAsync();
         }
 
-        public async Task<EnlaceTemporalResponse> RenovarEnlaceAsync(int id, int usuarioId, int horasExtra, string? ipAddress = null, string? userAgent = null)
+        public async Task<EnlaceTemporalResponse> RenovarEnlaceAsync(
+            int id,
+            int usuarioId,
+            int horasExtra,
+            string? ipAddress = null)
         {
             var enlace = await _contexto.enlaces_compartidos
                 .FirstOrDefaultAsync(e => e.id == id && e.id_usuario_creador == usuarioId);
@@ -657,8 +973,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             if (enlace == null)
                 throw new KeyNotFoundException("Enlace no encontrado o no tiene permisos");
 
-            if (enlace.estado != "EXPIRADO" && enlace.estado != "ACTIVO")
+            if (enlace.estado != "EXPIRADO" && enlace.estado != "ACTIVO" && enlace.estado != "DESACTIVADO")
                 throw new InvalidOperationException($"No se puede renovar un enlace en estado {enlace.estado}");
+
+            if (horasExtra < 1 || horasExtra > 720)
+                throw new InvalidOperationException("Las horas extra deben estar entre 1 y 720");
 
             enlace.estado = "ACTIVO";
             enlace.fecha_expiracion = DateTime.UtcNow.AddHours(horasExtra);
@@ -676,25 +995,21 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
                 "EQUIPO" => TipoEntidad.EQUIPO,
                 _ => TipoEntidad.PARTIDO
             };
-            var idEntidad = metadata?.TryGetValue("id_entidad", out var idEntVal) == true && idEntVal is JsonElement idEntElem
-      ? idEntElem.TryGetInt32(out var idEntInt) ? idEntInt : 0
-      : 0;
+
+            var idEntidad = 0;
+            if (metadata?.TryGetValue("id_entidad", out var idVal) == true && idVal is JsonElement idElem)
+                idEntidad = idElem.TryGetInt32(out var idInt) ? idInt : 0;
 
             var entidadNombre = await ObtenerNombreEntidadAsync(tipoEntidad, idEntidad);
-            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
-
-            var inviteUrl = $"{baseUrl}/invite/{enlace.codigo_enlace}";
-            var deepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={enlace.codigo_enlace}";
+            var urls = ObtenerUrls(enlace.codigo_enlace);
 
             return new EnlaceTemporalResponse
             {
                 Id = enlace.id,
                 Token = enlace.codigo_enlace,
                 EnlaceUnico = enlace.codigo_enlace,
-                InviteUrl = inviteUrl,
-                DeepLink = deepLink,
+                InviteUrl = urls.InviteUrl,
+                DeepLink = urls.DeepLink,
                 FechaExpiracion = enlace.fecha_expiracion ?? DateTime.UtcNow.AddHours(horasExtra),
                 TipoEntidad = tipoEntidad,
                 IdEntidad = idEntidad,
@@ -734,7 +1049,6 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
         {
             var manana = DateTime.UtcNow.Date.AddDays(1);
             var partidosManana = await _contexto.partidos
-                .Include(p => p.id_torneoNavigation)
                 .Include(p => p.id_equipo_localNavigation)
                 .Include(p => p.id_equipo_visitanteNavigation)
                 .Where(p => p.fecha_hora.Date == manana && p.estado == "PROGRAMADO")
@@ -744,339 +1058,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.AccesoTemporal
             {
                 if (partido.id_arbitro_principal.HasValue)
                 {
-                    var enlace = await CrearEnlaceArbitroPartidoAsync(1, partido.id, partido.id_arbitro_principal);
-
-                    var arbitro = await _contexto.usuarios.FindAsync(partido.id_arbitro_principal);
-                    if (arbitro != null && !string.IsNullOrEmpty(arbitro.email))
-                    {
-                        await _emailService.EnviarNotificacionEmailAsync(
-                            arbitro.email,
-                            "📋 Enlace para el acta del partido - TorneoPro",
-                            $@"
-                            <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;'>
-                                <h1>Estimado árbitro</h1>
-                                <p>Se le ha asignado el siguiente partido:</p>
-                                <p><strong>{partido.id_equipo_localNavigation?.nombre} vs {partido.id_equipo_visitanteNavigation?.nombre}</strong></p>
-                                <p>Fecha: {partido.fecha_hora:dd/MM/yyyy HH:mm}</p>
-                                <p>Cancha: {partido.id_canchaNavigation?.nombre ?? "Por definir"}</p>
-                                <br/>
-                                <p>📱 Abre la app:</p>
-                                <a href='{enlace.DeepLink}' style='background:#2563EB; color:white; padding:10px 20px; text-decoration:none; border-radius:5px; display:inline-block;'>
-                                    Abrir en TorneoPro
-                                </a>
-                                <br/>
-                                <p>🔗 O usa este enlace web: <a href='{enlace.InviteUrl}'>{enlace.InviteUrl}</a></p>
-                                <p>Este enlace expirará 2 horas después del partido.</p>
-                            </div>
-                            ",
-                            arbitro.nombres);
-                    }
+                    await CrearEnlaceArbitroPartidoAsync(1, partido.id, partido.id_arbitro_principal);
                 }
             }
 
             _logger.LogInformation("Enlaces automáticos enviados para {Cantidad} partidos", partidosManana.Count);
-        }
-
-        public async Task<DeepLinkInfoResponse?> ObtenerInfoDeepLinkAsync(string token)
-        {
-            var enlace = await _accesoTemporalService.ObtenerInfoEnlaceAsync(token);
-
-            if (enlace == null)
-            {
-                return new DeepLinkInfoResponse
-                {
-                    Token = token,
-                    EsValido = false,
-                    ErrorMensaje = "Enlace no encontrado"
-                };
-            }
-
-            var deepLinkScheme = _configuracion["AppConfig:DeepLink:Scheme"] ?? "torneopro";
-            var deepLinkHost = _configuracion["AppConfig:DeepLink:Host"] ?? "invite";
-
-            return new DeepLinkInfoResponse
-            {
-                Token = token,
-                Tipo = enlace.TipoEntidad.ToString(),
-                Titulo = enlace.TipoEntidad == TipoEntidad.EQUIPO ? $"Invitación al equipo {enlace.EntidadNombre}" : $"Invitación a {enlace.EntidadNombre}",
-                NombreEntidad = enlace.EntidadNombre,
-                FechaExpiracion = enlace.FechaExpiracion,
-                EsValido = enlace.EsActivo && enlace.FechaExpiracion > DateTime.UtcNow,
-                DeepLink = $"{deepLinkScheme}://{deepLinkHost}/open?token={token}"
-            };
-        }
-
-        #region Métodos Privados
-
-        private string ObtenerTituloInvitacion(TipoEntidad tipoEntidad, string nombreEntidad)
-        {
-            return tipoEntidad switch
-            {
-                TipoEntidad.PARTIDO => $"Partido: {nombreEntidad}",
-                TipoEntidad.TORNEO => $"Torneo: {nombreEntidad}",
-                TipoEntidad.EQUIPO => $"Invitación al equipo {nombreEntidad}",
-                _ => "Invitación TorneoPro"
-            };
-        }
-
-        private string ObtenerMensajeInvitacion(TipoEntidad tipoEntidad)
-        {
-            return tipoEntidad switch
-            {
-                TipoEntidad.PARTIDO => "Has sido asignado a este partido",
-                TipoEntidad.TORNEO => "Has sido invitado a este torneo",
-                TipoEntidad.EQUIPO => "Un administrador te ha invitado a unirte a este equipo",
-                _ => "Tienes una invitación pendiente"
-            };
-        }
-
-        private async Task<bool> EsAdminAsync(int usuarioId)
-        {
-            return await _contexto.usuarios_roles
-                .AnyAsync(ur => ur.id_usuario == usuarioId &&
-                               (ur.id_rol == 1 || ur.id_rol == 2) &&
-                               ur.estado == "ACTIVO");
-        }
-
-        private string GenerarTokenUnico()
-        {
-            return Convert.ToBase64String(Guid.NewGuid().ToByteArray())
-                .Replace("+", "-")
-                .Replace("/", "_")
-                .Replace("=", "")
-                .ToLowerInvariant();
-        }
-
-        private async Task ValidarEntidadAsync(TipoEntidad tipoEntidad, int idEntidad)
-        {
-            switch (tipoEntidad)
-            {
-                case TipoEntidad.PARTIDO:
-                    var partido = await _contexto.partidos.FindAsync(idEntidad);
-                    if (partido == null) throw new KeyNotFoundException("Partido no encontrado");
-                    break;
-                case TipoEntidad.TORNEO:
-                    var torneo = await _contexto.torneos.FindAsync(idEntidad);
-                    if (torneo == null) throw new KeyNotFoundException("Torneo no encontrado");
-                    break;
-                case TipoEntidad.ACTA_DIGITAL:
-                    var acta = await _contexto.actas_partidos.FindAsync(idEntidad);
-                    if (acta == null) throw new KeyNotFoundException("Acta no encontrada");
-                    break;
-                case TipoEntidad.EQUIPO:
-                    var equipo = await _contexto.equipos.FindAsync(idEntidad);
-                    if (equipo == null) throw new KeyNotFoundException("Equipo no encontrado");
-                    break;
-            }
-        }
-
-        private async Task<string> ObtenerNombreEntidadAsync(TipoEntidad tipoEntidad, int idEntidad)
-        {
-            switch (tipoEntidad)
-            {
-                case TipoEntidad.PARTIDO:
-                    var partido = await _contexto.partidos
-                        .Include(p => p.id_equipo_localNavigation)
-                        .Include(p => p.id_equipo_visitanteNavigation)
-                        .FirstOrDefaultAsync(p => p.id == idEntidad);
-                    return partido != null
-                        ? $"{partido.id_equipo_localNavigation?.nombre} vs {partido.id_equipo_visitanteNavigation?.nombre}"
-                        : "Partido no encontrado";
-                case TipoEntidad.TORNEO:
-                    var torneo = await _contexto.torneos.FindAsync(idEntidad);
-                    return torneo?.nombre ?? "Torneo no encontrado";
-                case TipoEntidad.ACTA_DIGITAL:
-                    var acta = await _contexto.actas_partidos
-                        .Include(a => a.id_partidoNavigation)
-                        .ThenInclude(p => p.id_equipo_localNavigation)
-                        .Include(a => a.id_partidoNavigation)
-                        .ThenInclude(p => p.id_equipo_visitanteNavigation)
-                        .FirstOrDefaultAsync(a => a.id == idEntidad);
-                    if (acta?.id_partidoNavigation != null)
-                    {
-                        return $"Acta - {acta.id_partidoNavigation.id_equipo_localNavigation?.nombre} vs {acta.id_partidoNavigation.id_equipo_visitanteNavigation?.nombre}";
-                    }
-                    return "Acta no encontrada";
-                case TipoEntidad.EQUIPO:
-                    var equipo = await _contexto.equipos.FindAsync(idEntidad);
-                    return equipo?.nombre ?? "Equipo no encontrado";
-                default:
-                    return "Entidad no especificada";
-            }
-        }
-
-        private async Task<AccesoEquipoData?> ConstruirAccesoEquipoAsync(int idEquipo, Dictionary<string, object>? metadata)
-        {
-            var equipo = await _contexto.equipos.FirstOrDefaultAsync(e => e.id == idEquipo && e.activo == true);
-            if (equipo == null) return null;
-
-            var idJugadorInvitado = metadata?.TryGetValue("id_usuario_destino", out var jugVal) == true && jugVal is JsonElement jugElem
-    ? jugElem.TryGetInt32(out var jugInt) ? jugInt : 0
-    : 0;
-
-            return new AccesoEquipoData
-            {
-                IdEquipo = equipo.id,
-                NombreEquipo = equipo.nombre,
-                EscudoUrl = equipo.escudo_url,
-                PuedeUnirse = metadata?.GetValueOrDefault("permite_unirse") as bool? ?? true,
-                IdJugadorInvitado = idJugadorInvitado,
-                MensajeBienvenida = $"Bienvenido al equipo {equipo.nombre}"
-            };
-        }
-
-        private async Task<AccesoPartidoData?> ConstruirAccesoPartidoAsync(int idPartido, Dictionary<string, object>? metadata)
-        {
-            var partido = await _contexto.partidos
-                .Include(p => p.id_equipo_localNavigation)
-                .Include(p => p.id_equipo_visitanteNavigation)
-                .Include(p => p.id_canchaNavigation)
-                .FirstOrDefaultAsync(p => p.id == idPartido);
-
-            if (partido == null) return null;
-
-            return new AccesoPartidoData
-            {
-                IdPartido = partido.id,
-                Local = partido.id_equipo_localNavigation?.nombre ?? "",
-                Visitante = partido.id_equipo_visitanteNavigation?.nombre ?? "",
-                FechaHora = partido.fecha_hora,
-                Cancha = partido.id_canchaNavigation?.nombre ?? "Por definir",
-                PuedeEditarEventos = metadata?.GetValueOrDefault("permite_editar_eventos") as bool? ?? false,
-                PuedeFirmarActa = metadata?.GetValueOrDefault("permite_firmar_acta") as bool? ?? false,
-                PuedeVerAlineaciones = metadata?.GetValueOrDefault("permite_ver_alineaciones") as bool? ?? true,
-                PuedeRegistrarResultado = metadata?.GetValueOrDefault("permite_registrar_resultado") as bool? ?? false,
-                PuedeConfirmarAsistencia = metadata?.GetValueOrDefault("permite_confirmar_asistencia") as bool? ?? false
-            };
-        }
-
-        private async Task<AccesoTorneoData?> ConstruirAccesoTorneoAsync(int idTorneo, Dictionary<string, object>? metadata)
-        {
-            var torneo = await _contexto.torneos.FindAsync(idTorneo);
-            if (torneo == null) return null;
-
-            return new AccesoTorneoData
-            {
-                IdTorneo = torneo.id,
-                Nombre = torneo.nombre,
-                Estado = torneo.estado ?? "PLANIFICACION",
-                PuedeVerTabla = true,
-                PuedeVerCalendario = true,
-                PuedeVerEstadisticas = true,
-                PuedeInscribirEquipo = metadata?.GetValueOrDefault("permite_inscribir_equipo") as bool? ?? false
-            };
-        }
-
-        private async Task<AccesoActaData?> ConstruirAccesoActaAsync(int idActa, Dictionary<string, object>? metadata)
-        {
-            var acta = await _contexto.actas_partidos.FindAsync(idActa);
-            if (acta == null) return null;
-
-            var baseUrl = _configuracion["AppConfig:AppUrl"] ?? ObtenerBaseUrl();
-
-            return new AccesoActaData
-            {
-                IdActa = acta.id,
-                IdPartido = acta.id_partido,
-                ActaUrl = $"{baseUrl}/api/actas/{acta.id}",
-                PuedeFirmar = metadata?.GetValueOrDefault("permite_firmar_acta") as bool? ?? false,
-                PuedeDescargarPdf = true,
-                FechaLimiteFirma = acta.fecha_firma.HasValue ? acta.fecha_firma.Value.AddDays(1) : DateTime.UtcNow.AddDays(1)
-            };
-        }
-
-        private async Task RegistrarUsoEnlace(int? enlaceId, int usuarioId, bool exitoso, string? motivo, string? ipAddress, string? userAgent)
-        {
-            // Obtener TODOS los roles activos del usuario
-            var rolesUsuario = await _contexto.usuarios_roles
-                .Where(ur => ur.id_usuario == usuarioId && ur.estado == "ACTIVO")
-                .Select(ur => ur.id_rol)
-                .ToListAsync();
-
-            // Obtener el rol JUGADOR como fallback (dinámicamente por código)
-            var rolJugador = await _contexto.tipos_rols
-                .Where(r => r.codigo == "JUGADOR")
-                .Select(r => r.id)
-                .FirstOrDefaultAsync();
-
-            // Si no existe rol JUGADOR, obtener el rol con el nivel_jerarquia más bajo
-            if (rolJugador == 0)
-            {
-                rolJugador = await _contexto.tipos_rols
-                    .OrderByDescending(r => r.nivel_jerarquia)
-                    .Select(r => r.id)
-                    .FirstOrDefaultAsync();
-            }
-
-            // Determinar el rol para id_rol_anterior (puede ser NULL o el primer rol)
-            int? rolAnterior = rolesUsuario.Any() ? rolesUsuario.First() : null;
-
-            // Determinar el rol para id_rol_nuevo (NUNCA puede ser NULL)
-            int rolNuevo;
-
-            if (rolesUsuario.Any())
-            {
-                // Obtenemos el rol de MENOR jerarquía (el menos privilegiado) para el historial
-                // Esto evita privilegios elevados en el log
-                var rolesConJerarquia = await _contexto.tipos_rols
-                    .Where(r => rolesUsuario.Contains(r.id))
-                    .OrderBy(r => r.nivel_jerarquia)  // Menor número = mayor jerarquía? Ajusta según tu lógica
-                    .Select(r => r.id)
-                    .ToListAsync();
-
-                // Tomar el rol de mayor jerarquía o el primero según tu necesidad
-                rolNuevo = rolesConJerarquia.FirstOrDefault();
-
-                if (rolNuevo == 0)
-                    rolNuevo = rolesUsuario.First();
-            }
-            else
-            {
-                // Usuario sin roles - usar el rol de menor jerarquía (JUGADOR por defecto)
-                rolNuevo = rolJugador;
-                _logger.LogWarning("Usuario {UsuarioId} sin roles asignados, se usa rol {RolId} por defecto", usuarioId, rolNuevo);
-            }
-
-            // Verificar que el rol existe en la tabla tipos_rol
-            var rolExiste = await _contexto.tipos_rols.AnyAsync(r => r.id == rolNuevo);
-            if (!rolExiste)
-            {
-                _logger.LogError("Rol {RolId} no existe en tipos_rol. Usuario: {UsuarioId}", rolNuevo, usuarioId);
-
-                // Último recurso: obtener el primer rol disponible
-                rolNuevo = await _contexto.tipos_rols
-                    .Select(r => r.id)
-                    .FirstOrDefaultAsync();
-
-                if (rolNuevo == 0)
-                {
-                    throw new InvalidOperationException("No hay roles disponibles en la base de datos");
-                }
-            }
-
-            var uso = new enlaces_historial_uso
-            {
-                codigo = CodigoHelper.GenerarCodigo("USE", 10),
-                id_enlace = enlaceId ?? 0,
-                id_usuario = usuarioId,
-                fecha_uso = DateTime.UtcNow,
-                ip_address = ipAddress,
-                user_agent = userAgent?.Length > 500 ? userAgent[..500] : userAgent,
-                uso_exitoso = exitoso,
-                motivo_fallo = motivo,
-                id_rol_anterior = rolAnterior,
-                id_rol_nuevo = rolNuevo
-            };
-
-            await _contexto.enlaces_historial_usos.AddAsync(uso);
-            await _contexto.SaveChangesAsync();
-
-            // Log para debugging: mostrar todos los roles del usuario
-            if (rolesUsuario.Count > 1)
-            {
-                _logger.LogDebug("Usuario {UsuarioId} tiene múltiples roles: {Roles}. Se usó rol {RolUsado} para el historial",
-                    usuarioId, string.Join(", ", rolesUsuario), rolNuevo);
-            }
         }
 
         #endregion

@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using TorneoPro.API.DTOs.AccesoTemporal.Response;
 
 namespace TorneoPro.API.DTOs.AccesoTemporal.Request
 {
@@ -63,20 +64,7 @@ namespace TorneoPro.API.DTOs.AccesoTemporal.Request
         public InviteInfoResponse? InviteInfo { get; set; }
     }
 
-    // DTO para la página web intermedia
-    public class InviteInfoResponse
-    {
-        public string Token { get; set; } = string.Empty;
-        public string Tipo { get; set; } = string.Empty;
-        public string Titulo { get; set; } = string.Empty;
-        public string Mensaje { get; set; } = string.Empty;
-        public string NombreEntidad { get; set; } = string.Empty;
-        public string DeepLink { get; set; } = string.Empty;
-        public bool RequiereAutenticacion { get; set; }
-        public DateTime FechaExpiracion { get; set; }
-        public bool EsValido { get; set; }
-        public string? ErrorMensaje { get; set; }
-    }
+   
 
 
     public enum TipoEntidad
