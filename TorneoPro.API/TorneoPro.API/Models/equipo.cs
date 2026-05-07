@@ -85,6 +85,8 @@ public partial class equipo
 
     public virtual ICollection<penales_tandum> penales_tanda { get; set; } = new List<penales_tandum>();
 
+    public virtual ICollection<solicitudes_equipo> solicitudes_equipos { get; set; } = new List<solicitudes_equipo>();
+
     public virtual ICollection<torneos_llafe> torneos_llafeid_equipo_con_byeNavigations { get; set; } = new List<torneos_llafe>();
 
     public virtual ICollection<torneos_llafe> torneos_llafeid_equipo_ganadorNavigations { get; set; } = new List<torneos_llafe>();

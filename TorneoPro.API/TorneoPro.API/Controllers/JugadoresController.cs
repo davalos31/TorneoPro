@@ -6,6 +6,7 @@ using TorneoPro.API.DTOs.Jugadores.Request;
 using TorneoPro.API.DTOs.Jugadores.Response;
 using TorneoPro.API.DTOs.Notificaciones;
 using TorneoPro.API.DTOs.Shared;
+using TorneoPro.API.Helpers;
 using TorneoPro.API.Servicios.Interfaces;
 using TorneoPro.API.Servicios.Interfaces.Auditoria;
 using TorneoPro.API.Servicios.Interfaces.Jugador;
@@ -13,14 +14,13 @@ using TorneoPro.API.Servicios.Interfaces.Notificacion;
 
 namespace TorneoPro.API.Controllers
 {
+    /// <summary>
+    /// Controlador para la gestión integral de jugadores, incluyendo CRUD, 
+    /// estadísticas, invitaciones, suspensiones y transferencias.
+    /// </summary>
     [Route("api/jugadores")]
     [ApiController]
     [Authorize]
-    /// <summary>
-    /// Controlador para la gestión integral de jugadores.
-    /// Proporciona endpoints para administración (CRUD), invitaciones, suspensiones,
-    /// estadísticas y generación de credenciales digitales.
-    /// </summary>
     public class JugadoresController : ControllerBase
     {
         private readonly IJugadorService _jugadorService;
@@ -40,14 +40,15 @@ namespace TorneoPro.API.Controllers
             _notificacionService = notificacionService;
         }
 
+        #region ========== CRUD PRINCIPAL ==========
         /// <summary>
-        /// Obtiene una lista paginada de jugadores permitiendo aplicar diversos filtros.
+        /// Obtiene una lista paginada de jugadores según los filtros proporcionados.
         /// </summary>
-        /// <param name="solicitud">Criterios de filtrado y parámetros de paginación.</param>
-        /// <returns>Resultado paginado con la lista de jugadores.</returns>
-        /// <response code="200">Retorna la lista de jugadores según el filtro.</response>
+        /// <param name="solicitud">Filtros de búsqueda y parámetros de paginación.</param>
+        /// <returns>Resultado paginado con la información de los jugadores.</returns>
+        /// <response code="200">Retorna la lista de jugadores.</response>
         /// <response code="401">No autorizado.</response>
-        /// <response code="403">Acceso denegado (Solo Roles Administrativos).</response>
+        /// <response code="403">Permisos insuficientes (Requiere SUPER_ADMIN, ADMIN o SUB_ADMIN).</response>
         [HttpGet]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN,SUB_ADMIN")]
         public async Task<IActionResult> Listar([FromQuery] FiltrarJugadorRequest solicitud)
@@ -71,12 +72,10 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Recupera el perfil detallado de un jugador específico por su ID.
+        /// Obtiene el perfil detallado de un jugador por su identificador único.
         /// </summary>
-        /// <param name="id">ID único del jugador.</param>
+        /// <param name="id">ID del jugador.</param>
         /// <returns>Detalles del perfil del jugador.</returns>
-        /// <response code="200">Jugador encontrado correctamente.</response>
-        /// <response code="404">El jugador no existe.</response>
         [HttpGet("{id}")]
         public async Task<IActionResult> ObtenerPorId(int id)
         {
@@ -102,14 +101,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Actualiza la información de un jugador existente.
+        /// Actualiza la información del perfil de un jugador.
         /// </summary>
-        /// <remarks>
-        /// Si la actualización es realizada por un administrador, se enviará una notificación al jugador.
-        /// </remarks>
-        /// <param name="id">ID del jugador a modificar.</param>
-        /// <param name="solicitud">Nuevos datos para el perfil.</param>
-        /// <returns>El perfil actualizado.</returns>
+        /// <param name="id">ID del jugador a actualizar.</param>
+        /// <param name="solicitud">Nuevos datos del jugador.</param>
+        /// <returns>Información del jugador actualizada.</returns>
         [HttpPut("{id}")]
         public async Task<IActionResult> ActualizarJugador(int id, [FromBody] ActualizarJugadorRequest solicitud)
         {
@@ -123,24 +119,20 @@ namespace TorneoPro.API.Controllers
             try
             {
                 var resultado = await _jugadorService.ActualizarJugadorAsync(id, usuarioId, solicitud, ipCliente, userAgent);
-                // Solo notificar si fue un admin quien actualizó, no el mismo jugador
+
                 if (usuarioId != id)
                 {
                     await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
                     {
                         IdUsuarioDestino = id,
-                        IdTipoNotificacion = 15, 
+                        IdTipoNotificacion = 15,
                         Titulo = "Tu perfil fue actualizado",
                         Mensaje = "Un administrador ha actualizado la información de tu perfil.",
                         Prioridad = "BAJA"
                     });
                 }
-                await _auditoriaService.RegistrarExitoAsync(
-                    usuarioId,
-                    "ACTUALIZAR_JUGADOR",
-                    "usuarios",
-                    id);
 
+                await _auditoriaService.RegistrarExitoAsync(usuarioId, "ACTUALIZAR_JUGADOR", "usuarios", id);
                 _logger.LogInformation("Jugador actualizado exitosamente - JugadorId: {JugadorId}", id);
 
                 return Ok(ApiRespuesta<JugadorResponse>.Success(resultado, "Jugador actualizado exitosamente"));
@@ -160,11 +152,14 @@ namespace TorneoPro.API.Controllers
             }
         }
 
+        #endregion
+
+        #region ========== INVITACIONES ==========
         /// <summary>
-        /// Envía una invitación por correo electrónico para que un usuario se una como jugador a un equipo.
+        /// Envía una invitación por correo electrónico para que un jugador se una a un equipo.
         /// </summary>
-        /// <param name="solicitud">Email del destinatario e ID del equipo.</param>
-        /// <returns>Confirmación del envío de la invitación.</returns>
+        /// <param name="solicitud">Datos del destinatario y equipo de destino.</param>
+        /// <returns>Resultado del envío de la invitación.</returns>
         [HttpPost("invitar")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> InvitarJugador([FromBody] InvitarJugadorRequest solicitud)
@@ -173,18 +168,15 @@ namespace TorneoPro.API.Controllers
             var ipCliente = ObtenerIpCliente();
             var userAgent = Request.Headers["User-Agent"].ToString();
 
-            _logger.LogInformation("Invitación a jugador - AdministradorId: {AdminId}, Email: {Email}, EquipoId: {EquipoId}, IP: {Ip}",
-                usuarioId, solicitud.Email, solicitud.IdEquipo, ipCliente);
+            _logger.LogInformation("Invitación a jugador - AdminId: {AdminId}, Email: {Email}, EquipoId: {EquipoId}",
+                usuarioId, solicitud.Email, solicitud.IdEquipo);
 
             try
             {
                 var resultado = await _jugadorService.InvitarJugadorAsync(usuarioId, solicitud, ipCliente, userAgent);
 
                 await _auditoriaService.RegistrarExitoAsync(
-                    usuarioId,
-                    "INVITAR_JUGADOR",
-                    "equipos",
-                    solicitud.IdEquipo,
+                    usuarioId, "INVITAR_JUGADOR", "equipos", solicitud.IdEquipo,
                     System.Text.Json.JsonSerializer.Serialize(new { solicitud.Email, solicitud.IdEquipo }));
 
                 _logger.LogInformation("Invitación enviada - Email: {Email}, EquipoId: {EquipoId}", solicitud.Email, solicitud.IdEquipo);
@@ -205,15 +197,11 @@ namespace TorneoPro.API.Controllers
                 return StatusCode(500, ApiRespuesta<object>.Error("Error al invitar al jugador"));
             }
         }
-
         /// <summary>
-        /// Procesa la aceptación de una invitación a un equipo mediante un token.
+        /// Procesa la aceptación de una invitación mediante un token de seguridad.
         /// </summary>
-        /// <remarks>
-        /// Este endpoint puede devolver una respuesta JSON para aplicaciones o un HTML de éxito para navegadores web.
-        /// </remarks>
         /// <param name="token">Token único de la invitación.</param>
-        /// <returns>Perfil del jugador actualizado o vista HTML de confirmación.</returns>
+        /// <returns>Retorna el perfil del jugador o una página HTML de éxito.</returns>
         [HttpGet("aceptar-invitacion")]
         public async Task<IActionResult> AceptarInvitacion([FromQuery] string token)
         {
@@ -236,7 +224,6 @@ namespace TorneoPro.API.Controllers
                     Prioridad = "MEDIA"
                 });
 
-                // Si es request de API (tiene Accept: application/json) devolver JSON
                 if (Request.Headers["Accept"].ToString().Contains("application/json") &&
                     !Request.Headers["Accept"].ToString().Contains("text/html"))
                 {
@@ -245,8 +232,9 @@ namespace TorneoPro.API.Controllers
 
                 var equipo = resultado.Equipos?.LastOrDefault();
                 var nombreEquipo = equipo?.Equipo ?? "el equipo";
+                var html = ViewHelper.GenerarPaginaExitoEquipo(nombreEquipo, resultado.NombreCompleto);
 
-                return Content(GenerarHtmlExito(nombreEquipo, resultado.NombreCompleto), "text/html");
+                return Content(html, "text/html");
             }
             catch (KeyNotFoundException ex)
             {
@@ -267,20 +255,18 @@ namespace TorneoPro.API.Controllers
             }
         }
 
+        #endregion
+
+        #region ========== ESTADÍSTICAS ==========
         /// <summary>
-        /// Obtiene el resumen de rendimiento y estadísticas de un jugador.
+        /// Obtiene el resumen de estadísticas generales de un jugador, opcionalmente filtrado por torneo.
         /// </summary>
         /// <param name="id">ID del jugador.</param>
-        /// <param name="idTorneo">Opcional. Filtra las estadísticas por un torneo específico.</param>
-        /// <returns>Objeto con goles, tarjetas, partidos jugados, etc.</returns>
+        /// <param name="idTorneo">ID opcional del torneo.</param>
         [HttpGet("{id}/estadisticas")]
         public async Task<IActionResult> ObtenerEstadisticas(int id, [FromQuery] int? idTorneo = null)
         {
             var usuarioId = ObtenerUsuarioActualId();
-            var ipCliente = ObtenerIpCliente();
-
-            _logger.LogInformation("Consulta de estadísticas de jugador - JugadorId: {JugadorId}, UsuarioId: {UsuarioId}, IP: {Ip}",
-                id, usuarioId, ipCliente);
 
             try
             {
@@ -295,19 +281,67 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
+        /// Obtiene un desglose de estadísticas del jugador por cada torneo participado.
+        /// </summary>
+        [HttpGet("{id}/estadisticas-por-torneo")]
+        public async Task<IActionResult> ObtenerEstadisticasPorTorneo(int id)
+        {
+            try
+            {
+                var estadisticas = await _jugadorService.ObtenerEstadisticasPorTorneoAsync(id);
+                return Ok(ApiRespuesta<List<EstadisticasPorTorneoResponse>>.Success(estadisticas));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener estadísticas por torneo - JugadorId: {JugadorId}", id);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al obtener estadísticas"));
+            }
+        }
+        /// <summary>
+        /// Obtiene métricas de rendimiento avanzadas del jugador.
+        /// </summary>
+        [HttpGet("{id}/estadisticas-avanzadas")]
+        public async Task<IActionResult> ObtenerEstadisticasAvanzadas(int id, [FromQuery] int? idTorneo = null)
+        {
+            try
+            {
+                var estadisticas = await _jugadorService.ObtenerEstadisticasAvanzadasAsync(id, idTorneo);
+                return Ok(ApiRespuesta<EstadisticasAvanzadasResponse>.Success(estadisticas));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener estadísticas avanzadas - JugadorId: {JugadorId}", id);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al obtener estadísticas avanzadas"));
+            }
+        }
+
+        /// <summary>
+        /// Genera un resumen del desempeño del jugador durante un año específico.
+        /// </summary>
+        [HttpGet("{id}/resumen-temporada")]
+        public async Task<IActionResult> ObtenerResumenTemporada(int id, [FromQuery] int anio)
+        {
+            try
+            {
+                var resumen = await _jugadorService.ObtenerResumenTemporadaAsync(id, anio);
+                return Ok(ApiRespuesta<ResumenTemporadaResponse>.Success(resumen));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener resumen de temporada - JugadorId: {JugadorId}, Anio: {Anio}", id, anio);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al obtener resumen de temporada"));
+            }
+        }
+
+        #endregion
+
+        #region ========== EQUIPOS Y COMPAÑEROS ==========
+        /// <summary>
         /// Lista todos los equipos a los que pertenece o ha pertenecido el jugador.
         /// </summary>
-        /// <param name="id">ID del jugador.</param>
-        /// <returns>Lista de equipos relacionados.</returns>
         [HttpGet("{id}/equipos")]
         public async Task<IActionResult> ObtenerEquipos(int id)
         {
-            var usuarioId = ObtenerUsuarioActualId();
-            var ipCliente = ObtenerIpCliente();
-
-            _logger.LogInformation("Consulta de equipos de jugador - JugadorId: {JugadorId}, UsuarioId: {UsuarioId}, IP: {Ip}",
-                id, usuarioId, ipCliente);
-
             try
             {
                 var equipos = await _jugadorService.ObtenerEquiposAsync(id);
@@ -321,11 +355,69 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Aplica una sanción de suspensión a un jugador, impidiéndole participar en una cantidad determinada de partidos.
+        /// Obtiene la lista de compañeros de equipo para un torneo específico.
         /// </summary>
-        /// <param name="id">ID del jugador a suspender.</param>
-        /// <param name="request">Detalles de la suspensión (motivo y cantidad de partidos).</param>
-        /// <returns>Confirmación de la suspensión aplicada.</returns>
+        [HttpGet("{id}/companeros/{idTorneo}")]
+        public async Task<IActionResult> ObtenerCompanerosEquipo(int id, int idTorneo)
+        {
+            try
+            {
+                var companeros = await _jugadorService.ObtenerCompanerosEquipoAsync(id, idTorneo);
+                return Ok(ApiRespuesta<List<CompañeroEquipoResponse>>.Success(companeros));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener compañeros - JugadorId: {JugadorId}, TorneoId: {TorneoId}", id, idTorneo);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al obtener compañeros"));
+            }
+        }
+
+        #endregion
+
+        #region ========== PARTIDOS ==========
+        /// <summary>
+        /// Obtiene el historial de partidos jugados por el usuario.
+        /// </summary>
+        [HttpGet("{id}/historial-partidos")]
+        public async Task<IActionResult> ObtenerHistorialPartidos(int id, [FromQuery] int? idTorneo = null, [FromQuery] int limite = 10)
+        {
+            try
+            {
+                var historial = await _jugadorService.ObtenerHistorialPartidosAsync(id, idTorneo, limite);
+                return Ok(ApiRespuesta<List<PartidoJugadorResponse>>.Success(historial));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener historial de partidos - JugadorId: {JugadorId}", id);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al obtener historial de partidos"));
+            }
+        }
+        /// <summary>
+        /// Obtiene la agenda de los próximos encuentros programados para el jugador.
+        /// </summary>
+        [HttpGet("{id}/proximos-partidos")]
+        public async Task<IActionResult> ObtenerProximosPartidos(int id, [FromQuery] int limite = 5)
+        {
+            try
+            {
+                var partidos = await _jugadorService.ObtenerProximosPartidosAsync(id, limite);
+                return Ok(ApiRespuesta<List<PartidoJugadorResponse>>.Success(partidos));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener próximos partidos - JugadorId: {JugadorId}", id);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al obtener próximos partidos"));
+            }
+        }
+
+        #endregion
+
+        #region ========== SUSPENSIONES ==========
+        /// <summary>
+        /// Registra una sanción disciplinaria para un jugador.
+        /// </summary>
+        /// <param name="id">ID del jugador.</param>
+        /// <param name="request">Motivo y duración de la suspensión.</param>
         [HttpPost("{id}/suspender")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> SuspenderJugador(int id, [FromBody] SuspenderJugadorRequest request)
@@ -334,27 +426,25 @@ namespace TorneoPro.API.Controllers
             var ipCliente = ObtenerIpCliente();
             var userAgent = Request.Headers["User-Agent"].ToString();
 
-            _logger.LogInformation("Suspensión de jugador - JugadorId: {JugadorId}, AdministradorId: {AdminId}, IP: {Ip}",
-                id, usuarioId, ipCliente);
+            _logger.LogInformation("Suspensión de jugador - JugadorId: {JugadorId}, AdminId: {AdminId}", id, usuarioId);
 
             try
             {
                 await _jugadorService.SuspenderJugadorAsync(id, usuarioId, request.Motivo, request.PartidosSuspension, request.IdTorneo, ipCliente, userAgent);
 
                 await _auditoriaService.RegistrarExitoAsync(
-                    usuarioId,
-                    "SUSPENDER_JUGADOR",
-                    "jugadores_suspensiones",
-                    id,
+                    usuarioId, "SUSPENDER_JUGADOR", "jugadores_suspensiones", id,
                     System.Text.Json.JsonSerializer.Serialize(new { request.Motivo, request.PartidosSuspension }));
-
-                _logger.LogInformation("Jugador suspendido - JugadorId: {JugadorId}, Partidos: {Partidos}", id, request.PartidosSuspension);
 
                 return Ok(ApiRespuesta<object>.Success(null, $"Jugador suspendido por {request.PartidosSuspension} partidos"));
             }
             catch (KeyNotFoundException ex)
             {
                 return NotFound(ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(ApiRespuesta<object>.Error(ex.Message));
             }
             catch (UnauthorizedAccessException ex)
             {
@@ -366,13 +456,9 @@ namespace TorneoPro.API.Controllers
                 return StatusCode(500, ApiRespuesta<object>.Error("Error al suspender el jugador"));
             }
         }
-
         /// <summary>
-        /// Levanta manualmente una suspensión activa de un jugador.
+        /// Levanta una suspensión activa de un jugador antes de su cumplimiento total.
         /// </summary>
-        /// <param name="id">ID del jugador.</param>
-        /// <param name="motivo">Opcional. Justificación de la rehabilitación.</param>
-        /// <returns>Confirmación de la rehabilitación.</returns>
         [HttpPost("{id}/rehabilitar")]
         [Authorize(Roles = "SUPER_ADMIN,ADMIN")]
         public async Task<IActionResult> RehabilitarJugador(int id, [FromQuery] string? motivo = null)
@@ -381,21 +467,13 @@ namespace TorneoPro.API.Controllers
             var ipCliente = ObtenerIpCliente();
             var userAgent = Request.Headers["User-Agent"].ToString();
 
-            _logger.LogInformation("Rehabilitación de jugador - JugadorId: {JugadorId}, AdministradorId: {AdminId}, IP: {Ip}",
-                id, usuarioId, ipCliente);
+            _logger.LogInformation("Rehabilitación de jugador - JugadorId: {JugadorId}, AdminId: {AdminId}", id, usuarioId);
 
             try
             {
                 await _jugadorService.RehabilitarJugadorAsync(id, usuarioId, motivo, ipCliente, userAgent);
 
-                await _auditoriaService.RegistrarExitoAsync(
-                    usuarioId,
-                    "REHABILITAR_JUGADOR",
-                    "jugadores_suspensiones",
-                    id,
-                    motivo);
-
-                _logger.LogInformation("Jugador rehabilitado - JugadorId: {JugadorId}", id);
+                await _auditoriaService.RegistrarExitoAsync(usuarioId, "REHABILITAR_JUGADOR", "jugadores_suspensiones", id, motivo);
 
                 return Ok(ApiRespuesta<object>.Success(null, "Jugador rehabilitado exitosamente"));
             }
@@ -415,19 +493,11 @@ namespace TorneoPro.API.Controllers
         }
 
         /// <summary>
-        /// Consulta el historial de suspensiones y sanciones de un jugador.
+        /// Consulta el historial de sanciones y suspensiones de un jugador.
         /// </summary>
-        /// <param name="id">ID del jugador.</param>
-        /// <returns>Lista de suspensiones (activas e históricas).</returns>
         [HttpGet("{id}/suspensiones")]
         public async Task<IActionResult> ObtenerSuspensiones(int id)
         {
-            var usuarioId = ObtenerUsuarioActualId();
-            var ipCliente = ObtenerIpCliente();
-
-            _logger.LogInformation("Consulta de suspensiones de jugador - JugadorId: {JugadorId}, UsuarioId: {UsuarioId}, IP: {Ip}",
-                id, usuarioId, ipCliente);
-
             try
             {
                 var suspensiones = await _jugadorService.ObtenerSuspensionesAsync(id);
@@ -440,20 +510,95 @@ namespace TorneoPro.API.Controllers
             }
         }
 
+        #endregion
+
+        #region ========== TRANSFERENCIAS ==========
         /// <summary>
-        /// Genera un documento PDF con la credencial digital del jugador para un torneo específico.
+        /// Inicia un proceso de solicitud para cambiar de equipo.
         /// </summary>
-        /// <param name="id">ID del jugador.</param>
-        /// <param name="idTorneo">ID del torneo para el cual se emite la credencial.</param>
-        /// <returns>Archivo PDF para su descarga o visualización.</returns>
+        [HttpPost("{id}/solicitar-transferencia")]
+        public async Task<IActionResult> SolicitarTransferencia(int id, [FromBody] SolicitarTransferenciaRequest solicitud)
+        {
+            var usuarioId = ObtenerUsuarioActualId();
+            if (usuarioId != id)
+                return StatusCode(403, ApiRespuesta<object>.Error("No puedes solicitar transferencia para otro jugador"));
+
+            var ipCliente = ObtenerIpCliente();
+            var userAgent = Request.Headers["User-Agent"].ToString();
+
+            try
+            {
+                var resultado = await _jugadorService.SolicitarTransferenciaAsync(id, solicitud, ipCliente, userAgent);
+
+                await _auditoriaService.RegistrarExitoAsync(
+                    usuarioId, "SOLICITAR_TRANSFERENCIA", "transferencias", resultado.Id,
+                    System.Text.Json.JsonSerializer.Serialize(new { solicitud.IdEquipoDestino, solicitud.Motivo }));
+
+                return Ok(ApiRespuesta<SolicitudTransferenciaResponse>.Success(resultado, "Solicitud de transferencia enviada"));
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al solicitar transferencia - JugadorId: {JugadorId}", id);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al solicitar transferencia"));
+            }
+        }
+        /// <summary>
+        /// Aprueba o rechaza una solicitud de transferencia pendiente.
+        /// </summary>
+        [HttpPost("transferencias/{solicitudId}/procesar")]
+        [Authorize(Roles = "SUPER_ADMIN,ADMIN,CAPITAN")]
+        public async Task<IActionResult> ProcesarTransferencia(int solicitudId, [FromQuery] bool aprobada, [FromQuery] string? comentario = null)
+        {
+            var usuarioId = ObtenerUsuarioActualId();
+            var ipCliente = ObtenerIpCliente();
+            var userAgent = Request.Headers["User-Agent"].ToString();
+
+            try
+            {
+                await _jugadorService.ProcesarTransferenciaAsync(solicitudId, usuarioId, aprobada, comentario, ipCliente, userAgent);
+
+                await _auditoriaService.RegistrarExitoAsync(
+                    usuarioId, aprobada ? "APROBAR_TRANSFERENCIA" : "RECHAZAR_TRANSFERENCIA", "transferencias", solicitudId, comentario);
+
+                var mensaje = aprobada ? "Transferencia aprobada exitosamente" : "Transferencia rechazada";
+                return Ok(ApiRespuesta<object>.Success(null, mensaje));
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return NotFound(ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return StatusCode(403, ApiRespuesta<object>.Error(ex.Message));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al procesar transferencia - SolicitudId: {SolicitudId}", solicitudId);
+                return StatusCode(500, ApiRespuesta<object>.Error("Error al procesar transferencia"));
+            }
+        }
+
+        #endregion
+
+        #region ========== CREDENCIALES ==========
+        /// <summary>
+        /// Genera un documento PDF con la credencial oficial del jugador para un torneo.
+        /// </summary>
         [HttpGet("{id}/credencial")]
         public async Task<IActionResult> GenerarCredencial(int id, [FromQuery] int idTorneo)
         {
             var usuarioId = ObtenerUsuarioActualId();
             var ipCliente = ObtenerIpCliente();
 
-            _logger.LogInformation("Generación de credencial - JugadorId: {JugadorId}, TorneoId: {TorneoId}, UsuarioId: {UsuarioId}, IP: {Ip}",
-                id, idTorneo, usuarioId, ipCliente);
+            _logger.LogInformation("Generación de credencial - JugadorId: {JugadorId}, TorneoId: {TorneoId}", id, idTorneo);
 
             try
             {
@@ -477,152 +622,24 @@ namespace TorneoPro.API.Controllers
             }
         }
 
+        #endregion
 
+        #region ========== MÉTODOS PRIVADOS ==========
 
-        #region Métodos Privados
-        /// <summary>
-        /// Extrae el ID del usuario autenticado desde los Claims del Token JWT.
-        /// </summary>
-        /// <exception cref="UnauthorizedAccessException">Se lanza si el token no es válido o no contiene el ID.</exception>
         private int ObtenerUsuarioActualId()
         {
-            var usuarioIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-                              ?? User.FindFirst("sub")?.Value;
-
-            if (string.IsNullOrEmpty(usuarioIdClaim) || !int.TryParse(usuarioIdClaim, out var usuarioId))
-            {
+            var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
+            if (string.IsNullOrEmpty(claim) || !int.TryParse(claim, out var id))
                 throw new UnauthorizedAccessException("Usuario no identificado");
-            }
-
-            return usuarioId;
+            return id;
         }
-        /// <summary>
-        /// Identifica la dirección IP del cliente que realiza la petición, considerando entornos con proxies.
-        /// </summary>
+
         private string ObtenerIpCliente()
         {
             var ip = Request.Headers["X-Forwarded-For"].FirstOrDefault();
-            if (string.IsNullOrEmpty(ip))
-            {
-                ip = HttpContext.Connection.RemoteIpAddress?.ToString();
-            }
-            return ip ?? "IP desconocida";
-        }
-        /// <summary>
-        /// Genera la estructura HTML para la página de éxito al unirse a un equipo.
-        /// </summary>
-        /// <param name="nombreEquipo">Nombre del equipo para mostrar en la tarjeta.</param>
-        /// <param name="nombreJugador">Nombre del jugador para personalizar el mensaje.</param>
-        /// <returns>String con el código HTML embebido.</returns>
-        private string GenerarHtmlExito(string nombreEquipo, string nombreJugador)
-        {
-            return $@"<!DOCTYPE html>
-<html lang='es'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>¡Bienvenido! - TorneoPro</title>
-    <style>
-        * {{ margin:0; padding:0; box-sizing:border-box; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #1E3A8A 0%, #2563EB 100%);
-            min-height: 100vh;
-            display: flex; align-items: center; justify-content: center;
-            padding: 20px;
-        }}
-        .card {{
-            max-width: 400px; width: 100%;
-            background: #fff; border-radius: 28px; overflow: hidden;
-            box-shadow: 0 32px 64px -12px rgba(0,0,0,.35);
-            animation: rise .5s cubic-bezier(.22,.68,0,1.2) both;
-        }}
-        @keyframes rise {{
-            from {{ opacity:0; transform:translateY(24px) scale(.97); }}
-            to   {{ opacity:1; transform:none; }}
-        }}
-        .header {{
-            background: linear-gradient(135deg, #1E3A8A, #2563EB);
-            padding: 28px 24px; text-align: center;
-        }}
-        .header h1 {{ color:#fff; font-size:24px; font-weight:700; }}
-        .header p  {{ color:rgba(255,255,255,.7); font-size:13px; margin-top:4px; }}
-        .body {{ padding: 32px 28px; text-align: center; }}
-        .success-icon {{
-            width: 80px; height: 80px; border-radius: 50%;
-            background: #DCFCE7; display: flex; align-items: center;
-            justify-content: center; margin: 0 auto 20px; font-size: 40px;
-        }}
-        .title {{ font-size: 20px; font-weight: 700; color: #111827; margin-bottom: 8px; }}
-        .subtitle {{ font-size: 14px; color: #6B7280; margin-bottom: 24px; line-height: 1.5; }}
-        .info-box {{
-            background: #F0FDF4; border: 1px solid #BBF7D0;
-            border-radius: 14px; padding: 14px 16px; margin-bottom: 24px;
-            text-align: left;
-        }}
-        .info-box .label {{
-            font-size: 11px; color: #16A34A; font-weight: 600;
-            text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px;
-        }}
-        .info-box .value {{ font-size: 16px; font-weight: 600; color: #111827; }}
-        .player-info {{ font-size: 13px; color: #6B7280; margin-top: 4px; }}
-        .footer {{
-            background: #F9FAFB; border-top: 1px solid #F3F4F6;
-            padding: 14px 28px; text-align: center;
-            font-size: 12px; color: #9CA3AF;
-        }}
-    </style>
-</head>
-<body>
-<div class='card'>
-    <div class='header'>
-        <h1>⚽ TorneoPro</h1>
-        <p>Plataforma de gestión deportiva</p>
-    </div>
-    <div class='body'>
-        <div class='success-icon'>✅</div>
-        <div class='title'>¡Te has unido exitosamente!</div>
-        <div class='subtitle'>
-            Ya eres parte del equipo. Puedes iniciar sesión en la app para ver tu perfil y estadísticas.
-        </div>
-        <div class='info-box'>
-            <div class='label'>Equipo</div>
-            <div class='value'>🏆 {System.Web.HttpUtility.HtmlEncode(nombreEquipo)}</div>
-            <div class='player-info'>👤 {System.Web.HttpUtility.HtmlEncode(nombreJugador)}</div>
-        </div>
-    </div>
-    <div class='footer'>
-        © {DateTime.UtcNow.Year} TorneoPro · Todos los derechos reservados
-    </div>
-</div>
-</body>
-</html>";
+            return string.IsNullOrEmpty(ip) ? HttpContext.Connection.RemoteIpAddress?.ToString() ?? "IP desconocida" : ip;
         }
 
         #endregion
-    }
-    /// <summary>
-    /// Estructura de datos para solicitar la suspensión de un jugador.
-    /// </summary>
-    public class SuspenderJugadorRequest
-    {
-        public string Motivo { get; set; } = string.Empty;
-        public int PartidosSuspension { get; set; } = 1;
-        public int? IdTorneo { get; set; }
-    }
-
-    /// <summary>
-    /// Respuesta detallada para el procesamiento de Deep Links en la aplicación móvil.
-    /// </summary>
-    public class DeepLinkInfoResponse
-    {
-        public string Token { get; set; } = string.Empty;
-        public string Tipo { get; set; } = string.Empty;
-        public string Titulo { get; set; } = string.Empty;
-        public string NombreEntidad { get; set; } = string.Empty;
-        public DateTime FechaExpiracion { get; set; }
-        public bool EsValido { get; set; }
-        public string? ErrorMensaje { get; set; }
-        public string DeepLink { get; set; } = string.Empty;
     }
 }

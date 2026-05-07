@@ -304,6 +304,189 @@ namespace TorneoPro.API.Helpers
 </html>";
         }
 
+        /// <summary>
+        /// Genera la página HTML de éxito al unirse a un equipo
+        /// </summary>
+        public static string GenerarPaginaExitoEquipo(string nombreEquipo, string nombreJugador)
+        {
+            var encodedEquipo = HtmlEncoder.Default.Encode(nombreEquipo);
+            var encodedJugador = HtmlEncoder.Default.Encode(nombreJugador);
+
+            return $@"
+    <!DOCTYPE html>
+    <html lang='es'>
+    <head>
+        <meta charset='UTF-8'>
+        <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+        <title>¡Bienvenido! - TorneoPro</title>
+        <link rel='stylesheet' href='/css/invite.css'>
+    </head>
+    <body>
+        <div class='card'>
+            <div class='header'>
+                <h1>⚽ TorneoPro</h1>
+                <p>Plataforma de gestión deportiva</p>
+            </div>
+            <div class='body'>
+                <div class='icon'>✅</div>
+                <div class='title'>¡Te has unido exitosamente!</div>
+                <div class='subtitle'>
+                    Ya eres parte del equipo. Puedes iniciar sesión en la app para ver tu perfil y estadísticas.
+                </div>
+                <div class='info-box'>
+                    <div class='info-label'>Equipo</div>
+                    <div class='info-value'>🏆 {encodedEquipo}</div>
+                    <div class='player-info'>👤 {encodedJugador}</div>
+                </div>
+            </div>
+            <div class='footer'>
+                © {DateTime.UtcNow.Year} TorneoPro · Todos los derechos reservados
+            </div>
+        </div>
+    </body>
+    </html>";
+        }
+
+        /// <summary>
+        /// Genera el HTML para el email de notificación
+        /// </summary>
+        public static string GenerarHtmlEmailNotificacion(string titulo, string mensaje, string nombreUsuario, string? accionUrl = null, string? prioridad = "MEDIA")
+        {
+            var badgeClass = prioridad?.ToLowerInvariant() switch
+            {
+                "alta" => "badge-alta",
+                "urgente" => "badge-alta",
+                "media" => "badge-media",
+                "baja" => "badge-baja",
+                _ => "badge-media"
+            };
+
+            var badgeText = prioridad?.ToUpperInvariant() ?? "MEDIA";
+
+            return $@"
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset='UTF-8'>
+                <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+                <title>{HtmlEncoder.Default.Encode(titulo)} - TorneoPro</title>
+                <style>
+                    body {{
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                        background-color: #f4f6f8;
+                        margin: 0;
+                        padding: 20px;
+                    }}
+                    .container {{
+                        max-width: 600px;
+                        margin: 0 auto;
+                        background: #ffffff;
+                        border-radius: 16px;
+                        overflow: hidden;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                    }}
+                    .header {{
+                        background: linear-gradient(135deg, #1E3A8A 0%, #2563EB 100%);
+                        padding: 24px;
+                        text-align: center;
+                        color: white;
+                    }}
+                    .header h1 {{
+                        font-size: 24px;
+                        margin: 0;
+                        letter-spacing: -0.5px;
+                    }}
+                    .header p {{
+                        font-size: 13px;
+                        margin: 5px 0 0;
+                        opacity: 0.8;
+                    }}
+                    .content {{
+                        padding: 28px;
+                    }}
+                    .greeting {{
+                        font-size: 18px;
+                        font-weight: 600;
+                        color: #1F2937;
+                        margin-bottom: 16px;
+                    }}
+                    .message {{
+                        color: #374151;
+                        line-height: 1.6;
+                        margin-bottom: 24px;
+                    }}
+                    .badge {{
+                        display: inline-block;
+                        padding: 4px 12px;
+                        border-radius: 20px;
+                        font-size: 11px;
+                        font-weight: 600;
+                        margin-bottom: 20px;
+                    }}
+                    .badge-alta {{ background: #FEE2E2; color: #DC2626; }}
+                    .badge-media {{ background: #FEF3C7; color: #D97706; }}
+                    .badge-baja {{ background: #D1FAE5; color: #059669; }}
+                    .button {{
+                        display: inline-block;
+                        padding: 12px 28px;
+                        background: #2563EB;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 40px;
+                        font-weight: 600;
+                        font-size: 14px;
+                        margin-top: 8px;
+                        transition: background 0.2s;
+                    }}
+                    .button:hover {{
+                        background: #1D4ED8;
+                    }}
+                    .divider {{
+                        border-top: 1px solid #E5E7EB;
+                        margin: 24px 0 16px;
+                    }}
+                    .footer {{
+                        background: #F9FAFB;
+                        padding: 16px 24px;
+                        text-align: center;
+                        font-size: 11px;
+                        color: #9CA3AF;
+                        border-top: 1px solid #E5E7EB;
+                    }}
+                    .footer a {{
+                        color: #2563EB;
+                        text-decoration: none;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class='container'>
+                    <div class='header'>
+                        <h1>⚽ TorneoPro</h1>
+                        <p>Plataforma de gestión deportiva</p>
+                    </div>
+                    <div class='content'>
+                        <div class='greeting'>¡Hola {HtmlEncoder.Default.Encode(nombreUsuario)}!</div>
+                        <div class='badge {badgeClass}'>Prioridad: {badgeText}</div>
+                        <div class='message'>{HtmlEncoder.Default.Encode(mensaje)}</div>
+                        {(string.IsNullOrEmpty(accionUrl) ? "" : $@"
+                        <div style='text-align: center;'>
+                            <a href='{accionUrl}' class='button'>Ver detalles</a>
+                        </div>")}
+                        <div class='divider'></div>
+                        <p style='font-size: 12px; color: #6B7280; margin: 0;'>
+                            Este es un mensaje automático de TorneoPro. Por favor no responda a este correo.
+                        </p>
+                    </div>
+                    <div class='footer'>
+                        <p>© {DateTime.UtcNow.Year} TorneoPro · Todos los derechos reservados</p>
+                        <p><a href='{accionUrl ?? "#"}'>Configurar notificaciones</a> | <a href='#'>Centro de ayuda</a></p>
+                    </div>
+                </div>
+            </body>
+            </html>";
+        }
+
         private static string GetIconoPorTipo(string tipo) => tipo switch
         {
             "EQUIPO" => "👥",

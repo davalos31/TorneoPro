@@ -50,5 +50,20 @@ namespace TorneoPro.API.Servicios.Interfaces.Usuarios
         /// Revocar rol activo del usuario
         /// </summary>
         Task RevocarRolAsync(int usuarioId, int rolId);
+
+        /// <summary>
+        /// Reactivar usuario desactivado
+        /// </summary>
+        Task ReactivarAsync(int id);
+
+        /// <summary>
+        /// Obtener estadísticas de usuarios
+        /// </summary>
+        Task<UsuarioEstadisticasResponse> ObtenerEstadisticasAsync();
+
+        /// <summary>
+        /// Listar usuarios con filtros avanzados
+        /// </summary>
+        Task<ResultadoPaginado<UsuarioResponse>> ObtenerTodosAvanzadoAsync(FiltrarUsuarioRequest solicitud);
     }
 }

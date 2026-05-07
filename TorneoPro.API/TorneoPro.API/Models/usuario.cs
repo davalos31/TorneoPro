@@ -153,6 +153,10 @@ public partial class usuario
 
     public virtual ICollection<preferencias_notificacione> preferencias_notificaciones { get; set; } = new List<preferencias_notificacione>();
 
+    public virtual ICollection<solicitudes_equipo> solicitudes_equipoid_jugadorNavigations { get; set; } = new List<solicitudes_equipo>();
+
+    public virtual ICollection<solicitudes_equipo> solicitudes_equipoid_usuario_procesadorNavigations { get; set; } = new List<solicitudes_equipo>();
+
     public virtual ICollection<tokens_recuperacion> tokens_recuperacions { get; set; } = new List<tokens_recuperacion>();
 
     public virtual ICollection<torneo> torneoid_organizadorNavigations { get; set; } = new List<torneo>();

@@ -28,6 +28,192 @@ namespace TorneoPro.API.Servicios.Implementaciones.Usuarios
             _configuracion = configuracion;
         }
 
+        /// <summary>
+        /// Reactivar usuario desactivado
+        /// </summary>
+        public async Task ReactivarAsync(int id)
+        {
+            var usuario = await _contexto.usuarios.FindAsync(id);
+            if (usuario == null)
+            {
+                throw new KeyNotFoundException("Usuario no encontrado");
+            }
+
+            if (usuario.activo == true)
+            {
+                throw new InvalidOperationException("El usuario ya está activo");
+            }
+
+            usuario.activo = true;
+            usuario.fecha_modificacion = DateTime.UtcNow;
+
+            await _contexto.SaveChangesAsync();
+            _logger.LogInformation("Usuario reactivado - UsuarioId: {UsuarioId}", id);
+        }
+
+        /// <summary>
+        /// Obtener estadísticas de usuarios
+        /// </summary>
+        public async Task<UsuarioEstadisticasResponse> ObtenerEstadisticasAsync()
+        {
+            var usuarios = await _contexto.usuarios.ToListAsync();
+            var usuariosRoles = await _contexto.usuarios_roles
+                .Where(ur => ur.estado == "ACTIVO" && ur.activo == true)
+                .ToListAsync();
+            var tiposUsuarios = await _contexto.tipos_usuarios.ToListAsync();
+            var roles = await _contexto.tipos_rols.ToListAsync();
+
+            var fechaActual = DateTime.UtcNow;
+            var fechaInicioMes = new DateTime(fechaActual.Year, fechaActual.Month, 1);
+            var fechaInicioMesAnterior = fechaInicioMes.AddMonths(-1);
+            var fechaInicioHace6Meses = fechaInicioMes.AddMonths(-6);
+
+            // Usuarios por tipo
+            var usuariosPorTipo = tiposUsuarios
+                .Select(t => new { t.nombre, Cantidad = usuarios.Count(u => u.id_tipo_usuario == t.id) })
+                .Where(x => x.Cantidad > 0)
+                .ToDictionary(x => x.nombre ?? "Desconocido", x => x.Cantidad);
+
+            // Usuarios por rol
+            var usuariosPorRol = roles
+                .Select(r => new { r.nombre, Cantidad = usuariosRoles.Count(ur => ur.id_rol == r.id) })
+                .Where(x => x.Cantidad > 0)
+                .ToDictionary(x => x.nombre ?? "Desconocido", x => x.Cantidad);
+
+            // Usuarios por mes (últimos 6 meses)
+            var usuariosPorMes = new Dictionary<string, int>();
+            for (int i = 5; i >= 0; i--)
+            {
+                var mesInicio = fechaActual.AddMonths(-i);
+                var mesFin = mesInicio.AddMonths(1);
+                var mesNombre = mesInicio.ToString("MMM yyyy");
+
+                var cantidad = usuarios.Count(u =>
+                    u.fecha_registro.HasValue &&
+                    u.fecha_registro.Value >= mesInicio &&
+                    u.fecha_registro.Value < mesFin);
+
+                usuariosPorMes[mesNombre] = cantidad;
+            }
+
+            return new UsuarioEstadisticasResponse
+            {
+                TotalUsuarios = usuarios.Count,
+                UsuariosActivos = usuarios.Count(u => u.activo == true),
+                UsuariosInactivos = usuarios.Count(u => u.activo == false),
+                UsuariosVerificados = usuarios.Count(u => u.email_verificado == true),
+                UsuariosPorTipo = usuariosPorTipo,
+                UsuariosPorRol = usuariosPorRol,
+                UsuariosPorMes = usuariosPorMes
+            };
+        }
+
+        /// <summary>
+        /// Listar usuarios con filtros avanzados
+        /// </summary>
+        public async Task<ResultadoPaginado<UsuarioResponse>> ObtenerTodosAvanzadoAsync(FiltrarUsuarioRequest solicitud)
+        {
+            var query = _contexto.usuarios
+                .Include(u => u.id_tipo_usuarioNavigation)
+                .AsQueryable();
+
+            // Filtro de búsqueda general
+            if (!string.IsNullOrWhiteSpace(solicitud.Buscar))
+            {
+                query = query.Where(u =>
+                    (u.nombres != null && u.nombres.Contains(solicitud.Buscar)) ||
+                    (u.apellidos != null && u.apellidos.Contains(solicitud.Buscar)) ||
+                    (u.email != null && u.email.Contains(solicitud.Buscar)) ||
+                    (u.codigo != null && u.codigo.Contains(solicitud.Buscar)) ||
+                    (u.telefono != null && u.telefono.Contains(solicitud.Buscar)));
+            }
+
+            // Filtro por tipo de usuario
+            if (solicitud.IdTipoUsuario.HasValue)
+            {
+                query = query.Where(u => u.id_tipo_usuario == solicitud.IdTipoUsuario.Value);
+            }
+
+            // Filtro por rol
+            if (solicitud.IdRol.HasValue)
+            {
+                query = query.Where(u => _contexto.usuarios_roles
+                    .Any(ur => ur.id_usuario == u.id && ur.id_rol == solicitud.IdRol.Value && ur.estado == "ACTIVO"));
+            }
+
+            // Filtro por ciudad
+            if (!string.IsNullOrWhiteSpace(solicitud.Ciudad))
+            {
+                query = query.Where(u => u.ciudad != null && u.ciudad.Contains(solicitud.Ciudad));
+            }
+
+            // Filtro por país
+            if (!string.IsNullOrWhiteSpace(solicitud.Pais))
+            {
+                query = query.Where(u => u.pais != null && u.pais.Contains(solicitud.Pais));
+            }
+
+         
+            // Filtro por activo
+            if (solicitud.SoloActivos == true)
+            {
+                query = query.Where(u => u.activo == true);
+            }
+            else if (solicitud.SoloActivos == false)
+            {
+                query = query.Where(u => u.activo == false);
+            }
+
+            // Filtro por email verificado
+            if (solicitud.EmailVerificado == true)
+            {
+                query = query.Where(u => u.email_verificado == true);
+            }
+            else if (solicitud.EmailVerificado == false)
+            {
+                query = query.Where(u => u.email_verificado == false);
+            }
+
+            // Filtro por fecha de registro
+            if (solicitud.FechaRegistroDesde.HasValue)
+            {
+                query = query.Where(u => u.fecha_registro >= solicitud.FechaRegistroDesde.Value);
+            }
+            if (solicitud.FechaRegistroHasta.HasValue)
+            {
+                var fechaHasta = solicitud.FechaRegistroHasta.Value.Date.AddDays(1);
+                query = query.Where(u => u.fecha_registro < fechaHasta);
+            }
+
+            var totalItems = await query.CountAsync();
+
+            // Ordenamiento
+            if (!string.IsNullOrWhiteSpace(solicitud.OrdenarPor))
+            {
+                query = solicitud.OrdenDescendente
+                    ? query.OrderByDescending(u => EF.Property<object>(u, solicitud.OrdenarPor))
+                    : query.OrderBy(u => EF.Property<object>(u, solicitud.OrdenarPor));
+            }
+            else
+            {
+                query = query.OrderByDescending(u => u.fecha_registro);
+            }
+
+            var usuarios = await query
+                .Skip((solicitud.Pagina - 1) * solicitud.TamanoPagina)
+                .Take(solicitud.TamanoPagina)
+                .ToListAsync();
+
+            var items = new List<UsuarioResponse>();
+            foreach (var usuario in usuarios)
+            {
+                var roles = await ObtenerRolesUsuario(usuario.id);
+                items.Add(MapearUsuarioResponse(usuario, roles));
+            }
+
+            return ResultadoPaginado<UsuarioResponse>.Crear(items, totalItems, solicitud.Pagina, solicitud.TamanoPagina);
+        }
+
         public async Task<ResultadoPaginado<UsuarioResponse>> ObtenerTodosAsync(PaginacionRequest solicitud)
         {
             var query = _contexto.usuarios

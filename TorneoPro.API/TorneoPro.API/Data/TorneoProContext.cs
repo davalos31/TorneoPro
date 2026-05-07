@@ -74,6 +74,8 @@ public partial class TorneoProContext : DbContext
 
     public virtual DbSet<preferencias_notificacione> preferencias_notificaciones { get; set; }
 
+    public virtual DbSet<solicitudes_equipo> solicitudes_equipos { get; set; }
+
     public virtual DbSet<tipos_documento> tipos_documentos { get; set; }
 
     public virtual DbSet<tipos_enlace> tipos_enlaces { get; set; }
@@ -1373,6 +1375,56 @@ public partial class TorneoProContext : DbContext
                 .HasForeignKey(d => d.id_usuario)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK__preferenc__id_us__451F3D2B");
+        });
+
+        modelBuilder.Entity<solicitudes_equipo>(entity =>
+        {
+            entity.HasKey(e => e.id).HasName("PK__solicitu__3213E83F6A5D9BA4");
+
+            entity.HasIndex(e => new { e.id_equipo, e.estado }, "IX_solicitudes_equipos_equipo_estado");
+
+            entity.HasIndex(e => e.estado, "IX_solicitudes_equipos_estado");
+
+            entity.HasIndex(e => e.fecha_solicitud, "IX_solicitudes_equipos_fecha_solicitud").IsDescending();
+
+            entity.HasIndex(e => e.id_equipo, "IX_solicitudes_equipos_id_equipo");
+
+            entity.HasIndex(e => e.id_jugador, "IX_solicitudes_equipos_id_jugador");
+
+            entity.HasIndex(e => new { e.id_equipo, e.fecha_solicitud }, "IX_solicitudes_equipos_pendientes").HasFilter("([estado]='PENDIENTE' AND [activo]=(1))");
+
+            entity.HasIndex(e => e.codigo, "UQ__solicitu__40F9A2060101FBAC").IsUnique();
+
+            entity.HasIndex(e => e.codigo, "UQ_solicitudes_equipos_codigo").IsUnique();
+
+            entity.Property(e => e.activo).HasDefaultValue(true);
+            entity.Property(e => e.codigo)
+                .HasMaxLength(50)
+                .IsUnicode(false);
+            entity.Property(e => e.comentario).HasMaxLength(500);
+            entity.Property(e => e.estado)
+                .HasMaxLength(50)
+                .IsUnicode(false)
+                .HasDefaultValue("PENDIENTE");
+            entity.Property(e => e.fecha_creacion).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.fecha_modificacion).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.fecha_solicitud).HasDefaultValueSql("(getdate())");
+            entity.Property(e => e.mensaje).HasMaxLength(500);
+            entity.Property(e => e.metadata).HasDefaultValue("{}");
+
+            entity.HasOne(d => d.id_equipoNavigation).WithMany(p => p.solicitudes_equipos)
+                .HasForeignKey(d => d.id_equipo)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK__solicitud__id_eq__06ED0088");
+
+            entity.HasOne(d => d.id_jugadorNavigation).WithMany(p => p.solicitudes_equipoid_jugadorNavigations)
+                .HasForeignKey(d => d.id_jugador)
+                .OnDelete(DeleteBehavior.ClientSetNull)
+                .HasConstraintName("FK__solicitud__id_ju__07E124C1");
+
+            entity.HasOne(d => d.id_usuario_procesadorNavigation).WithMany(p => p.solicitudes_equipoid_usuario_procesadorNavigations)
+                .HasForeignKey(d => d.id_usuario_procesador)
+                .HasConstraintName("FK__solicitud__id_us__0ABD916C");
         });
 
         modelBuilder.Entity<tipos_documento>(entity =>

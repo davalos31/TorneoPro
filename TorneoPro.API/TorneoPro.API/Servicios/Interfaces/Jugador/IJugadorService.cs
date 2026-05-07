@@ -73,7 +73,47 @@ namespace TorneoPro.API.Servicios.Interfaces.Jugador
         /// </summary>
         Task<byte[]> GenerarCredencialAsync(int id, int idTorneo, string baseUrl);
 
-        
+        /// <summary>
+        /// Obtener historial de partidos del jugador
+        /// </summary>
+        Task<List<PartidoJugadorResponse>> ObtenerHistorialPartidosAsync(int id, int? idTorneo = null, int? limite = 10);
+
+        /// <summary>
+        /// Obtener próximos partidos del jugador
+        /// </summary>
+        Task<List<PartidoJugadorResponse>> ObtenerProximosPartidosAsync(int id, int limite = 5);
+
+        /// <summary>
+        /// Obtener estadísticas detalladas por torneo
+        /// </summary>
+        Task<List<EstadisticasPorTorneoResponse>> ObtenerEstadisticasPorTorneoAsync(int id);
+
+        /// <summary>
+        /// Obtener compañeros de equipo en un torneo específico
+        /// </summary>
+        Task<List<CompañeroEquipoResponse>> ObtenerCompanerosEquipoAsync(int id, int idTorneo);
+
+        /// <summary>
+        /// Solicitar transferencia a otro equipo
+        /// </summary>
+        Task<SolicitudTransferenciaResponse> SolicitarTransferenciaAsync(int id, SolicitarTransferenciaRequest solicitud, string? ipAddress = null, string? userAgent = null);
+
+        /// <summary>
+        /// Aprobar/rechazar transferencia (capitán/admin)
+        /// </summary>
+        Task ProcesarTransferenciaAsync(int solicitudId, int usuarioId, bool aprobada, string? comentario = null, string? ipAddress = null, string? userAgent = null);
+
+        /// <summary>
+        /// Obtener estadísticas avanzadas del jugador
+        /// </summary>
+        Task<EstadisticasAvanzadasResponse> ObtenerEstadisticasAvanzadasAsync(int id, int? idTorneo = null);
+
+        /// <summary>
+        /// Obtener resumen de temporada del jugador
+        /// </summary>
+        Task<ResumenTemporadaResponse> ObtenerResumenTemporadaAsync(int id, int anio);
+
+
     }
 
     public class SuspensionJugadorResponse
