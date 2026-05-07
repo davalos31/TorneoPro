@@ -41,8 +41,10 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
         private string ObtenerBaseUrl()
         {
             var request = _httpContextAccessor.HttpContext?.Request;
-            return $"{request.Scheme}://{request.Host}";
+            return $"{request?.Scheme}://{request?.Host}";
         }
+
+        #region CRUD Principal
 
         public async Task<ResultadoPaginado<CanchaResponse>> ObtenerTodosAsync(FiltrarCanchaRequest solicitud)
         {
@@ -120,7 +122,6 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
 
             var response = MapearACanchaDetalleResponse(cancha);
 
-            // Obtener disponibilidad de la semana
             var hoy = DateTime.UtcNow.Date;
             var finSemana = hoy.AddDays(7);
             response.DisponibilidadSemana = await ObtenerDisponibilidadAsync(id, hoy, finSemana);
@@ -134,7 +135,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             if (!esAdmin)
                 throw new UnauthorizedAccessException("No tiene permisos para crear canchas");
 
-            // Verificar si ya existe una cancha con el mismo nombre
+            // Validar que el tipo de superficie existe
+            var tipoSuperficie = await _contexto.tipos_superficies.FindAsync(solicitud.IdTipoSuperficie);
+            if (tipoSuperficie == null)
+                throw new InvalidOperationException("El tipo de superficie no es válido");
+
             var existe = await _contexto.canchas
                 .AnyAsync(c => c.nombre == solicitud.Nombre && c.activo == true);
 
@@ -150,13 +155,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             _contexto.canchas.Add(cancha);
             await _contexto.SaveChangesAsync();
 
-            // Cargar la navegación para obtener el tipo de superficie
             await _contexto.Entry(cancha)
                 .Reference(c => c.id_tipo_superficieNavigation)
                 .LoadAsync();
 
-            var response = MapearACanchaResponse(cancha);
-            return response;
+            return MapearACanchaResponse(cancha);
         }
 
         public async Task<CanchaResponse> ActualizarAsync(int id, int usuarioId, ActualizarCanchaRequest solicitud, string? ipAddress = null, string? userAgent = null)
@@ -169,7 +172,14 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             if (cancha == null)
                 throw new KeyNotFoundException("Cancha no encontrada");
 
-            // Verificar nombre único si se está cambiando
+            // Validar tipo de superficie si se está cambiando
+            if (solicitud.IdTipoSuperficie.HasValue)
+            {
+                var tipoSuperficie = await _contexto.tipos_superficies.FindAsync(solicitud.IdTipoSuperficie.Value);
+                if (tipoSuperficie == null)
+                    throw new InvalidOperationException("El tipo de superficie no es válido");
+            }
+
             if (!string.IsNullOrWhiteSpace(solicitud.Nombre) && solicitud.Nombre != cancha.nombre)
             {
                 var existe = await _contexto.canchas
@@ -224,78 +234,11 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
 
             await _contexto.SaveChangesAsync();
 
-            // Cargar la navegación para obtener el tipo de superficie
             await _contexto.Entry(cancha)
                 .Reference(c => c.id_tipo_superficieNavigation)
                 .LoadAsync();
 
-            var response = MapearACanchaResponse(cancha);
-            return response;
-        }
-
-        public async Task<string> SubirFotoAsync(int id, int usuarioId, IFormFile foto, string? ipAddress = null, string? userAgent = null)
-        {
-            var esAdmin = await EsAdminAsync(usuarioId);
-            if (!esAdmin)
-                throw new UnauthorizedAccessException("No tiene permisos para modificar canchas");
-
-            var cancha = await _contexto.canchas.FindAsync(id);
-            if (cancha == null)
-                throw new KeyNotFoundException("Cancha no encontrada");
-
-            var rutaRelativa = await _archivosHelper.GuardarImagenAsync(foto, "canchas", 5);
-            cancha.foto_url = rutaRelativa;
-            cancha.fecha_modificacion = DateTime.UtcNow;
-            await _contexto.SaveChangesAsync();
-
-            var baseUrl = ObtenerBaseUrl();
-            return _archivosHelper.ObtenerUrlArchivo(rutaRelativa, baseUrl);
-        }
-
-        public async Task<string> ActualizarFotoAsync(int id, int usuarioId, IFormFile foto, string? ipAddress = null, string? userAgent = null)
-        {
-            var esAdmin = await EsAdminAsync(usuarioId);
-            if (!esAdmin)
-                throw new UnauthorizedAccessException("No tiene permisos para modificar canchas");
-
-            var cancha = await _contexto.canchas.FindAsync(id);
-            if (cancha == null)
-                throw new KeyNotFoundException("Cancha no encontrada");
-
-            // Eliminar foto anterior si existe
-            if (!string.IsNullOrEmpty(cancha.foto_url))
-            {
-                var rutaAnterior = cancha.foto_url.Replace("/uploads/", "");
-                _archivosHelper.EliminarArchivo(rutaAnterior);
-            }
-
-            var rutaRelativa = await _archivosHelper.GuardarImagenAsync(foto, "canchas", 5);
-            cancha.foto_url = rutaRelativa;
-            cancha.fecha_modificacion = DateTime.UtcNow;
-            await _contexto.SaveChangesAsync();
-
-            var baseUrl = ObtenerBaseUrl();
-            return _archivosHelper.ObtenerUrlArchivo(rutaRelativa, baseUrl);
-        }
-
-        public async Task EliminarFotoAsync(int id, int usuarioId, string? ipAddress = null, string? userAgent = null)
-        {
-            var esAdmin = await EsAdminAsync(usuarioId);
-            if (!esAdmin)
-                throw new UnauthorizedAccessException("No tiene permisos para modificar canchas");
-
-            var cancha = await _contexto.canchas.FindAsync(id);
-            if (cancha == null)
-                throw new KeyNotFoundException("Cancha no encontrada");
-
-            if (!string.IsNullOrEmpty(cancha.foto_url))
-            {
-                var rutaAnterior = cancha.foto_url.Replace("/uploads/", "");
-                _archivosHelper.EliminarArchivo(rutaAnterior);
-                cancha.foto_url = null;
-                cancha.fecha_modificacion = DateTime.UtcNow;
-                await _contexto.SaveChangesAsync();
-            }
+            return MapearACanchaResponse(cancha);
         }
 
         public async Task DesactivarAsync(int id, int usuarioId, string? motivo = null, string? ipAddress = null, string? userAgent = null)
@@ -332,13 +275,84 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             await _contexto.SaveChangesAsync();
         }
 
+        #endregion
+
+        #region Gestión de Fotos
+
+        public async Task<string> SubirFotoAsync(int id, int usuarioId, IFormFile foto, string? ipAddress = null, string? userAgent = null)
+        {
+            var esAdmin = await EsAdminAsync(usuarioId);
+            if (!esAdmin)
+                throw new UnauthorizedAccessException("No tiene permisos para modificar canchas");
+
+            var cancha = await _contexto.canchas.FindAsync(id);
+            if (cancha == null)
+                throw new KeyNotFoundException("Cancha no encontrada");
+
+            var rutaRelativa = await _archivosHelper.GuardarImagenAsync(foto, "canchas", 5);
+            cancha.foto_url = rutaRelativa;
+            cancha.fecha_modificacion = DateTime.UtcNow;
+            await _contexto.SaveChangesAsync();
+
+            var baseUrl = ObtenerBaseUrl();
+            return _archivosHelper.ObtenerUrlArchivo(rutaRelativa, baseUrl);
+        }
+
+        public async Task<string> ActualizarFotoAsync(int id, int usuarioId, IFormFile foto, string? ipAddress = null, string? userAgent = null)
+        {
+            var esAdmin = await EsAdminAsync(usuarioId);
+            if (!esAdmin)
+                throw new UnauthorizedAccessException("No tiene permisos para modificar canchas");
+
+            var cancha = await _contexto.canchas.FindAsync(id);
+            if (cancha == null)
+                throw new KeyNotFoundException("Cancha no encontrada");
+
+            if (!string.IsNullOrEmpty(cancha.foto_url))
+            {
+                var rutaAnterior = cancha.foto_url.Replace("/uploads/", "");
+                _archivosHelper.EliminarArchivo(rutaAnterior);
+            }
+
+            var rutaRelativa = await _archivosHelper.GuardarImagenAsync(foto, "canchas", 5);
+            cancha.foto_url = rutaRelativa;
+            cancha.fecha_modificacion = DateTime.UtcNow;
+            await _contexto.SaveChangesAsync();
+
+            var baseUrl = ObtenerBaseUrl();
+            return _archivosHelper.ObtenerUrlArchivo(rutaRelativa, baseUrl);
+        }
+
+        public async Task EliminarFotoAsync(int id, int usuarioId, string? ipAddress = null, string? userAgent = null)
+        {
+            var esAdmin = await EsAdminAsync(usuarioId);
+            if (!esAdmin)
+                throw new UnauthorizedAccessException("No tiene permisos para modificar canchas");
+
+            var cancha = await _contexto.canchas.FindAsync(id);
+            if (cancha == null)
+                throw new KeyNotFoundException("Cancha no encontrada");
+
+            if (!string.IsNullOrEmpty(cancha.foto_url))
+            {
+                var rutaAnterior = cancha.foto_url.Replace("/uploads/", "");
+                _archivosHelper.EliminarArchivo(rutaAnterior);
+                cancha.foto_url = null;
+                cancha.fecha_modificacion = DateTime.UtcNow;
+                await _contexto.SaveChangesAsync();
+            }
+        }
+
+        #endregion
+
+        #region Disponibilidad y Bloqueos
+
         public async Task<List<DisponibilidadResponse>> ObtenerDisponibilidadAsync(int id, DateTime fechaInicio, DateTime fechaFin)
         {
             var cancha = await _contexto.canchas.FindAsync(id);
             if (cancha == null)
                 throw new KeyNotFoundException("Cancha no encontrada");
 
-            // Obtener partidos programados
             var partidos = await _contexto.partidos
                 .Where(p => p.id_cancha == id && p.fecha_hora >= fechaInicio && p.fecha_hora <= fechaFin && p.activo == true)
                 .Select(p => new DisponibilidadResponse
@@ -351,7 +365,6 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
                 })
                 .ToListAsync();
 
-            // Obtener bloqueos manuales
             var bloqueos = await _contexto.fechas_bloqueadas
                 .Where(fb => fb.id_cancha == id && fb.fecha_inicio >= fechaInicio && fb.fecha_inicio <= fechaFin && fb.activo == true)
                 .Select(fb => new DisponibilidadResponse
@@ -364,9 +377,63 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
                 })
                 .ToListAsync();
 
-            var ocupados = partidos.Concat(bloqueos).ToList();
+            return partidos.Concat(bloqueos).ToList();
+        }
 
-            return ocupados;
+        /// <summary>
+        /// Obtiene disponibilidad horaria para un día específico
+        /// </summary>
+        public async Task<List<DisponibilidadHorariaResponse>> ObtenerDisponibilidadHorariaAsync(int id, DateTime fecha, int duracionMinutos = 60)
+        {
+            var cancha = await _contexto.canchas.FindAsync(id);
+            if (cancha == null)
+                throw new KeyNotFoundException("Cancha no encontrada");
+
+            var fechaInicio = fecha.Date;
+            var fechaFin = fecha.Date.AddDays(1).AddSeconds(-1);
+
+            // Obtener ocupaciones del día
+            var ocupaciones = new List<(DateTime Inicio, DateTime Fin)>();
+
+            var partidos = await _contexto.partidos
+                .Where(p => p.id_cancha == id && p.fecha_hora >= fechaInicio && p.fecha_hora <= fechaFin && p.activo == true)
+                .Select(p => new { Inicio = p.fecha_hora, Fin = p.fecha_hora.AddMinutes(120) })
+                .ToListAsync();
+
+            foreach (var p in partidos)
+                ocupaciones.Add((p.Inicio, p.Fin));
+
+            var bloqueos = await _contexto.fechas_bloqueadas
+                .Where(fb => fb.id_cancha == id && fb.fecha_inicio <= fechaFin && fb.fecha_fin >= fechaInicio && fb.activo == true)
+                .Select(fb => new { Inicio = fb.fecha_inicio, Fin = fb.fecha_fin })
+                .ToListAsync();
+
+            foreach (var b in bloqueos)
+                ocupaciones.Add((b.Inicio, b.Fin));
+
+            // Generar franjas horarias
+            var resultado = new List<DisponibilidadHorariaResponse>();
+            var horaActual = fechaInicio.AddHours(8); // Ejemplo: desde 8:00 AM
+            var horaFin = fechaInicio.AddHours(22); // Ejemplo: hasta 10:00 PM
+
+            while (horaActual < horaFin)
+            {
+                var finSlot = horaActual.AddMinutes(duracionMinutos);
+                var ocupado = ocupaciones.Any(o => o.Inicio < finSlot && o.Fin > horaActual);
+
+                resultado.Add(new DisponibilidadHorariaResponse
+                {
+                    HoraInicio = horaActual,
+                    HoraFin = finSlot,
+                    Disponible = !ocupado,
+                    IdPartido = !ocupado ? (int?)null :
+                        partidos.FirstOrDefault(p => p.Inicio < finSlot && p.Fin > horaActual)?.Inicio.GetHashCode() ?? 0
+                });
+
+                horaActual = finSlot;
+            }
+
+            return resultado;
         }
 
         public async Task<BloqueoResponse> BloquearFechaAsync(int id, int usuarioId, BloquearFechaRequest solicitud, string? ipAddress = null, string? userAgent = null)
@@ -379,7 +446,23 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             if (cancha == null)
                 throw new KeyNotFoundException("Cancha no encontrada");
 
-            // Verificar que no haya partidos programados en ese horario
+            if (solicitud.FechaInicio >= solicitud.FechaFin)
+                throw new InvalidOperationException("La fecha de inicio debe ser anterior a la fecha de fin");
+
+            if (solicitud.FechaInicio < DateTime.UtcNow)
+                throw new InvalidOperationException("No se pueden bloquear fechas pasadas");
+
+            // Validar conflicto con bloqueos existentes
+            var bloqueoExistente = await _contexto.fechas_bloqueadas
+                .AnyAsync(fb => fb.id_cancha == id &&
+                                fb.fecha_inicio < solicitud.FechaFin &&
+                                fb.fecha_fin > solicitud.FechaInicio &&
+                                fb.activo == true);
+
+            if (bloqueoExistente)
+                throw new InvalidOperationException("Ya existe un bloqueo en ese horario");
+
+            // Verificar partidos en ese horario
             if (!solicitud.AplicaATodasCanchas)
             {
                 var hayPartido = await _contexto.partidos
@@ -410,60 +493,10 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             _contexto.fechas_bloqueadas.Add(bloqueo);
             await _contexto.SaveChangesAsync();
 
-            // Notificar a capitanes de equipos con partidos próximos en esa cancha
+            // Notificar partidos afectados
             if (!solicitud.AplicaATodasCanchas)
             {
-                var partidosAfectados = await _contexto.partidos
-                    .Include(p => p.id_equipo_localNavigation)
-                    .Include(p => p.id_equipo_visitanteNavigation)
-                    .Where(p => p.id_cancha == id &&
-                                p.fecha_hora >= solicitud.FechaInicio &&
-                                p.fecha_hora <= solicitud.FechaFin &&
-                                p.estado == "PROGRAMADO" &&
-                                p.activo == true)
-                    .ToListAsync();
-
-                foreach (var partido in partidosAfectados)
-                {
-                    // Notificar capitán local
-                    if (partido.id_equipo_localNavigation?.id_capitan.HasValue == true)
-                    {
-                        await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
-                        {
-                            IdUsuarioDestino = partido.id_equipo_localNavigation.id_capitan.Value,
-                            IdTipoNotificacion = 9,
-                            Titulo = "Cancha bloqueada",
-                            Mensaje = $"La cancha {cancha.nombre} ha sido bloqueada del {solicitud.FechaInicio:dd/MM/yyyy HH:mm} al {solicitud.FechaFin:dd/MM/yyyy HH:mm}. Motivo: {solicitud.Motivo}. Tu partido puede verse afectado.",
-                            Prioridad = "ALTA"
-                        });
-                    }
-
-                    // Notificar capitán visitante
-                    if (partido.id_equipo_visitanteNavigation?.id_capitan.HasValue == true)
-                    {
-                        await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
-                        {
-                            IdUsuarioDestino = partido.id_equipo_visitanteNavigation.id_capitan.Value,
-                            IdTipoNotificacion = 9,
-                            Titulo = "Cancha bloqueada",
-                            Mensaje = $"La cancha {cancha.nombre} ha sido bloqueada. Tu partido puede verse afectado.",
-                            Prioridad = "ALTA"
-                        });
-                    }
-
-                    // Notificar árbitro si tiene asignado
-                    if (partido.id_arbitro_principal.HasValue)
-                    {
-                        await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
-                        {
-                            IdUsuarioDestino = partido.id_arbitro_principal.Value,
-                            IdTipoNotificacion = 9,
-                            Titulo = "Cancha bloqueada",
-                            Mensaje = $"La cancha {cancha.nombre} donde arbitrarás ha sido bloqueada. Motivo: {solicitud.Motivo}.",
-                            Prioridad = "ALTA"
-                        });
-                    }
-                }
+                await NotificarPartidosAfectados(id, cancha.nombre, solicitud, usuarioId);
             }
 
             return new BloqueoResponse
@@ -478,6 +511,60 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
                 AplicaATodasCanchas = bloqueo.aplica_a_todas_canchas ?? false,
                 FechaRegistro = bloqueo.fecha_registro ?? DateTime.UtcNow
             };
+        }
+
+        private async Task NotificarPartidosAfectados(int canchaId, string nombreCancha, BloquearFechaRequest solicitud, int usuarioId)
+        {
+            var partidosAfectados = await _contexto.partidos
+                .Include(p => p.id_equipo_localNavigation)
+                .Include(p => p.id_equipo_visitanteNavigation)
+                .Where(p => p.id_cancha == canchaId &&
+                            p.fecha_hora >= solicitud.FechaInicio &&
+                            p.fecha_hora <= solicitud.FechaFin &&
+                            p.estado == "PROGRAMADO" &&
+                            p.activo == true)
+                .ToListAsync();
+
+            foreach (var partido in partidosAfectados)
+            {
+                var mensaje = $"La cancha {nombreCancha} ha sido bloqueada del {solicitud.FechaInicio:dd/MM/yyyy HH:mm} al {solicitud.FechaFin:dd/MM/yyyy HH:mm}. Motivo: {solicitud.Motivo}.";
+
+                if (partido.id_equipo_localNavigation?.id_capitan.HasValue == true)
+                {
+                    await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
+                    {
+                        IdUsuarioDestino = partido.id_equipo_localNavigation.id_capitan.Value,
+                        IdTipoNotificacion = 9,
+                        Titulo = "Cancha bloqueada",
+                        Mensaje = mensaje,
+                        Prioridad = "ALTA"
+                    });
+                }
+
+                if (partido.id_equipo_visitanteNavigation?.id_capitan.HasValue == true)
+                {
+                    await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
+                    {
+                        IdUsuarioDestino = partido.id_equipo_visitanteNavigation.id_capitan.Value,
+                        IdTipoNotificacion = 9,
+                        Titulo = "Cancha bloqueada",
+                        Mensaje = mensaje,
+                        Prioridad = "ALTA"
+                    });
+                }
+
+                if (partido.id_arbitro_principal.HasValue)
+                {
+                    await _notificacionService.EnviarNotificacionAsync(usuarioId, new EnviarNotificacionRequest
+                    {
+                        IdUsuarioDestino = partido.id_arbitro_principal.Value,
+                        IdTipoNotificacion = 9,
+                        Titulo = "Cancha bloqueada",
+                        Mensaje = mensaje,
+                        Prioridad = "ALTA"
+                    });
+                }
+            }
         }
 
         public async Task EliminarBloqueoAsync(int canchaId, int bloqueoId, int usuarioId, string? ipAddress = null, string? userAgent = null)
@@ -496,12 +583,45 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
             await _contexto.SaveChangesAsync();
         }
 
+        #endregion
+
+        #region Búsqueda y Catálogos
+
+        /// <summary>
+        /// Busca canchas disponibles optimizado (sin N+1 queries)
+        /// </summary>
         public async Task<List<CanchaResponse>> BuscarCanchasDisponiblesAsync(BuscarCanchaRequest solicitud)
         {
-            // Obtener canchas activas
+            // Obtener IDs de canchas ocupadas por partidos en el horario
+            var idsOcupadasPorPartidos = await _contexto.partidos
+                .Where(p => p.fecha_hora >= solicitud.FechaHoraInicio &&
+                            p.fecha_hora <= solicitud.FechaHoraFin &&
+                            p.estado != "CANCELADO")
+                .Select(p => p.id_cancha)
+                .Distinct()
+                .ToListAsync();
+
+            // Obtener IDs de canchas ocupadas por bloqueos en el horario
+            var idsOcupadasPorBloqueos = await _contexto.fechas_bloqueadas
+                .Where(fb => fb.fecha_inicio <= solicitud.FechaHoraFin &&
+                             fb.fecha_fin >= solicitud.FechaHoraInicio &&
+                             fb.activo == true)
+                .Select(fb => fb.id_cancha)
+                .Distinct()
+                .ToListAsync();
+
+            var idsOcupadas = idsOcupadasPorPartidos
+                .Concat(idsOcupadasPorBloqueos)
+                .Where(id => id.HasValue)
+                .Select(id => id!.Value)
+                .Distinct()
+                .ToList();
+
+            // Obtener canchas disponibles (excluyendo ocupadas)
             var query = _contexto.canchas
                 .Include(c => c.id_tipo_superficieNavigation)
                 .Where(c => c.activo == true && c.estado == "DISPONIBLE")
+                .Where(c => !idsOcupadas.Contains(c.id))
                 .AsQueryable();
 
             if (solicitud.IdTipoSuperficie.HasValue)
@@ -517,38 +637,28 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
                 query = query.Where(c => c.tiene_iluminacion == solicitud.TieneIluminacion.Value);
 
             var canchas = await query.ToListAsync();
-
-            // Filtrar por disponibilidad en el horario solicitado
-            var disponibles = new List<cancha>();
-
-            foreach (var cancha in canchas)
-            {
-                // Verificar partidos en ese horario
-                var hayPartido = await _contexto.partidos
-                    .AnyAsync(p => p.id_cancha == cancha.id &&
-                                   p.fecha_hora >= solicitud.FechaHoraInicio &&
-                                   p.fecha_hora <= solicitud.FechaHoraFin &&
-                                   p.estado != "CANCELADO");
-
-                if (hayPartido)
-                    continue;
-
-                // Verificar bloqueos en ese horario
-                var hayBloqueo = await _contexto.fechas_bloqueadas
-                    .AnyAsync(fb => (fb.id_cancha == cancha.id || fb.id_cancha == null) &&
-                                   fb.fecha_inicio <= solicitud.FechaHoraFin &&
-                                   fb.fecha_fin >= solicitud.FechaHoraInicio &&
-                                   fb.activo == true);
-
-                if (hayBloqueo)
-                    continue;
-
-                disponibles.Add(cancha);
-            }
-
-            var response = disponibles.Select(c => MapearACanchaResponse(c)).ToList();
-            return response;
+            return canchas.Select(c => MapearACanchaResponse(c)).ToList();
         }
+
+        /// <summary>
+        /// Obtiene tipos de superficie disponibles
+        /// </summary>
+        public async Task<List<TipoSuperficieResponse>> ObtenerTiposSuperficieAsync()
+        {
+            var tipos = await _contexto.tipos_superficies
+                .Where(t => t.activo == true)
+                .Select(t => new TipoSuperficieResponse
+                {
+                    Id = t.id,
+                    Codigo = t.codigo,
+                    Nombre = t.nombre
+                })
+                .ToListAsync();
+
+            return tipos;
+        }
+
+        #endregion
 
         #region Métodos de Mapeo Manual
 
@@ -585,7 +695,7 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
                 Ciudad = cancha.ciudad,
                 Pais = cancha.pais,
                 Estado = cancha.estado,
-                Activo = cancha.activo ?? false, 
+                Activo = cancha.activo ?? false,
                 FotoUrl = cancha.foto_url
             };
         }
@@ -603,19 +713,19 @@ namespace TorneoPro.API.Servicios.Implementaciones.Cancha
                 Ciudad = cancha.ciudad,
                 Pais = cancha.pais,
                 Estado = cancha.estado,
-                Activo = cancha.activo ?? false, 
+                Activo = cancha.activo ?? false,
                 FotoUrl = cancha.foto_url,
                 Direccion = cancha.direccion,
                 Latitud = cancha.latitud,
                 Longitud = cancha.longitud,
                 UrlMapa = cancha.url_mapa,
                 CapacidadEspectadores = cancha.capacidad_espectadores,
-                TieneIluminacion = cancha.tiene_iluminacion ?? false, 
-                TieneVestuarios = cancha.tiene_vestuarios ?? false, 
-                TieneEstacionamiento = cancha.tiene_estacionamiento ?? false, 
+                TieneIluminacion = cancha.tiene_iluminacion ?? false,
+                TieneVestuarios = cancha.tiene_vestuarios ?? false,
+                TieneEstacionamiento = cancha.tiene_estacionamiento ?? false,
                 FechaCreacion = cancha.fecha_creacion ?? DateTime.MinValue,
-                FechaModificacion = cancha.fecha_modificacion ?? DateTime.MinValue, 
-                DisponibilidadSemana = new List<DisponibilidadResponse>() 
+                FechaModificacion = cancha.fecha_modificacion ?? DateTime.MinValue,
+                DisponibilidadSemana = new List<DisponibilidadResponse>()
             };
         }
 

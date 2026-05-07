@@ -70,5 +70,15 @@ namespace TorneoPro.API.Servicios.Interfaces.Cancha
         /// Buscar canchas disponibles en un rango de fechas
         /// </summary>
         Task<List<CanchaResponse>> BuscarCanchasDisponiblesAsync(BuscarCanchaRequest solicitud);
+
+        /// <summary>
+        /// Obtiene disponibilidad horaria para un día específico
+        /// </summary>
+        Task<List<DisponibilidadHorariaResponse>> ObtenerDisponibilidadHorariaAsync(int id, DateTime fecha, int duracionMinutos = 60);
+
+        /// <summary>
+        /// Obtiene los tipos de superficie disponibles
+        /// </summary>
+        Task<List<TipoSuperficieResponse>> ObtenerTiposSuperficieAsync();
     }
 }
